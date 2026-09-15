@@ -1,0 +1,101 @@
+services:
+  # One-shot migration job: runs EF migrations and seeds initial data, then exits.
+  # pls-app waits for this service to complete successfully before starting.
+  db-migrate:
+    build: .
+    environment:
+      - PLS_MIGRATE_ONLY=true
+      - ConnectionStrings__DefaultConnection=Server=mysql_db;Port=3306;Database=pls;User=${DB_USER};Password=${DB_PASSWORD}
+      - Jwt__Secret=${JWT_SECRET}
+      - Jwt__Issuer=PLS
+      - Bootstrap__AdminUsername=${ADMIN_USERNAME:-admin}
+      - Bootstrap__AdminPassword=${ADMIN_PASSWORD}
+      - Bootstrap__TestUserUsername=${TEST_USER_USERNAME:-user}
+      - Bootstrap__TestUserPassword=${TEST_USER_PASSWORD:-password}
+      - Mqtt__Enabled=false
+    depends_on:
+      mysql_db:
+        condition: service_healthy
+    restart: "no"
+
+  pls-app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ConnectionStrings__DefaultConnection=Server=mysql_db;Port=3306;Database=pls;User=${DB_USER};Password=${DB_PASSWORD}
+      # JWT — secret must be set via .env or CI secrets, never committed
+      - Jwt__Secret=${JWT_SECRET}
+      - Jwt__Issuer=PLS
+      - Jwt__AdminExpirationMinutes=60
+      - Jwt__QrExpirationMinutes=480
+      - Jwt__UserExpirationMinutes=480
+      - Jwt__RefreshTokenExpirationDays=7
+      # Admin bootstrap — password required in production (see Bootstrap__AdminPassword)
+      - Bootstrap__AdminUsername=${ADMIN_USERNAME:-admin}
+      - Bootstrap__AdminPassword=${ADMIN_PASSWORD}
+      # Test/presentation user — remove before public launch
+      - Bootstrap__TestUserUsername=${TEST_USER_USERNAME:-user}
+      - Bootstrap__TestUserPassword=${TEST_USER_PASSWORD:-password}
+      # MQTT
+      - Mqtt__Enabled=true
+      - Mqtt__BrokerHost=mosquitto
+      - Mqtt__BrokerPort=1883
+      - Mqtt__ClientId=pls-backend
+      - Mqtt__Username=${MQTT_USERNAME:-pls-backend}
+      - Mqtt__Password=${MQTT_PASSWORD:-pls-mqtt-password}
+      - Mqtt__RedactPersonalData=${MQTT_REDACT_PERSONAL_DATA:-false}
+      # CORS — comma-separated list of allowed origins
+      - PLS_ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  mysql_db:
+    image: mysql:8.0
+    environment:
+      - MYSQL_USER=${DB_USER}
+      - MYSQL_PASSWORD=${DB_PASSWORD}
+      - MYSQL_DATABASE=pls
+      - MYSQL_ROOT_PASSWORD=${DB_ROOT_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${DB_USER}", "-p${DB_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ./mosquitto/mosquitto-prod.conf:/mosquitto/config/mosquitto.conf
+      - ./mosquitto/acl:/mosquitto/config/acl
+      # passwd file must be generated and placed at ./mosquitto/passwd before first run.
+      # See mosquitto/mosquitto-prod.conf for generation instructions.
+      - ./mosquitto/passwd:/mosquitto/config/passwd:ro
+      - mosquitto_data:/mosquitto/data
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "localhost", "-p", "1883",
+             "-u", "${MQTT_USERNAME:-pls-backend}", "-P", "${MQTT_PASSWORD:-pls-mqtt-password}",
+             "-t", "pls/healthcheck", "-m", "1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  mosquitto_data:

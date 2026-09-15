@@ -1,0 +1,47 @@
+# Development override — apply with: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Differences from production:
+# - Mosquitto uses anonymous access (no password file required)
+# - pls-app uses Development environment (Swagger UI enabled)
+# - Mosquitto health check uses anonymous connection
+
+services:
+  pls-app:
+    build:
+      args:
+        VITE_MODE: development
+        VITE_ENABLE_DEV_BUTTONS: "true"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - PLS_AUTO_MIGRATE=true
+      - Bootstrap__SeedDevSampleData=true
+      - Mqtt__Username=
+      - Mqtt__Password=
+      - Features__EnableDevQrHelper=true
+      - Features__EnableDevLogin=true
+    # In development we let pls-app apply migrations at startup.
+    depends_on:
+      db-migrate:
+        condition: service_started
+      mysql_db:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+
+  db-migrate:
+    # Keep dependency graph valid in dev, but skip migration job container execution.
+    # pls-app applies migrations itself via PLS_AUTO_MIGRATE=true.
+    # The image's ENTRYPOINT is `dotnet PLS.Api.dll` — overriding `command` alone
+    # only changes its arguments, so `entrypoint` must be overridden too or this
+    # silently runs the full app (with prod-defaulted ASPNETCORE_ENVIRONMENT)
+    # instead of skipping.
+    entrypoint: ["sh", "-c"]
+    command: ["echo 'dev: skipping db-migrate container'; exit 0"]
+    restart: "no"
+
+  mosquitto:
+    volumes:
+      - ./mosquitto/mosquitto-dev.conf:/mosquitto/config/mosquitto.conf
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "localhost", "-p", "1883",
+             "-t", "pls/healthcheck", "-m", "1"]

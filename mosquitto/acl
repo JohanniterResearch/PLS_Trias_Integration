@@ -1,0 +1,8 @@
+# Mosquitto topic ACL file.
+# Format: user <username> / topic <pattern> <read|write|readwrite|deny>
+
+# pls-backend: publish-only to pls/# topic namespace
+user pls-backend
+topic write pls/#
+
+# Deny all other access by default (implicit — no further allow rules)
