@@ -40,7 +40,7 @@ type Zone = {
 };
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
-const specPath = resolve(currentDir, '../../../../docs/specs/ambulanzprotokoll_page1.json');
+const specPath = resolve(currentDir, '../../../../specs/ambulanzprotokoll_page1.json');
 const spec = JSON.parse(readFileSync(specPath, 'utf-8')) as { stateSchema: unknown; zones: Zone[] };
 const zone = (id: string) => spec.zones.find((candidate) => candidate.id === id)!;
 

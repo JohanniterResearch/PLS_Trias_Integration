@@ -22,10 +22,15 @@ public class MqttSettings
     // Reliability: bounded queue for publish operations during broker outages.
     // When full, the oldest pending operation is dropped.
     public int PendingQueueCapacity { get; set; } = 200;
-    // Privacy: when true, name/longitude/latitude are omitted from published payloads.
-    // Enable for external integrations where location and patient name must not be exposed.
+    // Privacy: when true, the patient name is omitted from published payloads.
+    public bool RedactName { get; set; } = true;
+    // Privacy: when true, longitude/latitude are omitted from published payloads.
+    // Enable for external integrations where the patient location must not be exposed.
     // Core triage fields (triagefarbe, atmung, blutung, radialispuls, etc.) are always included.
-    public bool RedactPersonalData { get; set; } = true;
+    public bool RedactLocation { get; set; } = false;
+    // Legacy pre-split switch: when true, name and location are both omitted, so existing
+    // opt-ins (Mqtt__RedactPersonalData=true) keep hiding location.
+    public bool RedactPersonalData { get; set; } = false;
 }
 
 /// <summary>
@@ -181,41 +186,29 @@ public class MqttPublishService : IHostedService, IDisposable
 
             // Versioned topic namespace — pls/v1/... allows future breaking changes on pls/v2/...
             // Payload includes schemaVersion for receivers to detect format changes.
-            // Personal data (name, location) is omitted when RedactPersonalData is enabled.
-            var payload = _settings.RedactPersonalData
-                ? (object)new
-                {
-                    schemaVersion = 1,
-                    eventTimestamp = now,
-                    patientId = patient.Id,
-                    triagefarbe = patient.Triagefarbe,
-                    atmung = patient.Atmung,
-                    blutung = patient.Blutung,
-                    radialispuls = patient.Radialispuls,
-                    transport = patient.Transport,
-                    dringend = patient.Dringend,
-                    kontaminiert = patient.Kontaminiert,
-                    bodyParts = patient.Body?.BodyParts,
-                    operationSceneId = patient.QrCodePatient?.OperationSceneId
-                }
-                : new
-                {
-                    schemaVersion = 1,
-                    eventTimestamp = now,
-                    patientId = patient.Id,
-                    triagefarbe = patient.Triagefarbe,
-                    atmung = patient.Atmung,
-                    blutung = patient.Blutung,
-                    radialispuls = patient.Radialispuls,
-                    transport = patient.Transport,
-                    dringend = patient.Dringend,
-                    kontaminiert = patient.Kontaminiert,
-                    name = patient.Name,
-                    longitude = patient.LongitudePatient,
-                    latitude = patient.LatitudePatient,
-                    bodyParts = patient.Body?.BodyParts,
-                    operationSceneId = patient.QrCodePatient?.OperationSceneId
-                };
+            // Name and location are omitted when RedactName / RedactLocation (or legacy RedactPersonalData) are enabled.
+            var payload = new Dictionary<string, object?>
+            {
+                ["schemaVersion"] = 1,
+                ["eventTimestamp"] = now,
+                ["patientId"] = patient.Id,
+                ["triagefarbe"] = patient.Triagefarbe,
+                ["atmung"] = patient.Atmung,
+                ["blutung"] = patient.Blutung,
+                ["radialispuls"] = patient.Radialispuls,
+                ["transport"] = patient.Transport,
+                ["dringend"] = patient.Dringend,
+                ["kontaminiert"] = patient.Kontaminiert
+            };
+            if (!_settings.RedactName && !_settings.RedactPersonalData)
+                payload["name"] = patient.Name;
+            if (!_settings.RedactLocation && !_settings.RedactPersonalData)
+            {
+                payload["longitude"] = patient.LongitudePatient;
+                payload["latitude"] = patient.LatitudePatient;
+            }
+            payload["bodyParts"] = patient.Body?.BodyParts;
+            payload["operationSceneId"] = patient.QrCodePatient?.OperationSceneId;
 
             var json = JsonSerializer.Serialize(payload);
 

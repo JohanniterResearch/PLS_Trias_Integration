@@ -8,6 +8,9 @@
 .claude-flow/
 .visualReference/
 .references/
+docs/
+.plans/
+**/AGENTS.md
 
 # Secrets / local env
 .env

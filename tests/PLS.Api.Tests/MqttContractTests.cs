@@ -159,6 +159,57 @@ public class MqttContractTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task PatientPayload_DefaultConfig_IncludesLocationButNotName()
+    {
+        var token = await GetAdminTokenAsync();
+        var patientId = await CreatePatientAsync(token);
+        _messages.Clear();
+
+        await UpdateLocationAsync(_client!, token, patientId, lat: 48.2, lng: 16.37);
+
+        var root = await WaitForPatientPayloadAsync(patientId);
+        Assert.Equal(16.37, root.GetProperty("longitude").GetDouble(), 6);
+        Assert.Equal(48.2, root.GetProperty("latitude").GetDouble(), 6);
+        Assert.False(root.TryGetProperty("name", out _), "name must be redacted by default");
+    }
+
+    [Theory]
+    [InlineData("Mqtt:RedactLocation")]
+    [InlineData("Mqtt:RedactPersonalData")] // legacy switch must still hide location
+    public async Task PatientPayload_LocationRedactionEnabled_OmitsLocationAndName(string redactionSetting)
+    {
+        var redactingFactory = new MqttEnabledFactory(_brokerPort, new()
+        {
+            [redactionSetting] = "true",
+            // Distinct client id so the broker does not disconnect the fixture's publisher.
+            ["Mqtt:ClientId"] = "pls-backend-redacting"
+        });
+        await redactingFactory.InitializeAsync();
+        var redactingClient = redactingFactory.CreateClient();
+        try
+        {
+            var token = await GetAdminTokenFromAsync(redactingClient);
+            var patientId = await CreatePatientViaAsync(redactingClient, token);
+            _messages.Clear();
+
+            await UpdateLocationAsync(redactingClient, token, patientId, lat: 48.2, lng: 16.37);
+
+            var root = await WaitForPatientPayloadAsync(patientId);
+            Assert.False(root.TryGetProperty("longitude", out _), "longitude must be redacted");
+            Assert.False(root.TryGetProperty("latitude", out _), "latitude must be redacted");
+            Assert.False(root.TryGetProperty("name", out _), "name must be redacted");
+            Assert.Equal(patientId, root.GetProperty("patientId").GetInt32());
+        }
+        finally
+        {
+            // Same teardown as the fixture: the WebApplicationFactory sync Dispose disposes
+            // singletons before StopAsync, which breaks MqttPublishService shutdown.
+            redactingClient.Dispose();
+            await redactingFactory.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task PatientPayload_TriagefarbeReflectsUpdatedValue()
     {
         var token = await GetAdminTokenAsync();
@@ -324,6 +375,30 @@ public class MqttContractTests : IAsyncLifetime
         response.EnsureSuccessStatusCode();
     }
 
+    private static async Task UpdateLocationAsync(HttpClient client, string token, int patientId, double lat, double lng)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, $"api/v2/persons/{patientId}/location")
+        {
+            Content = JsonContent.Create(new { lat, lng })
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var response = await client.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+    }
+
+    private async Task<JsonElement> WaitForPatientPayloadAsync(int patientId)
+    {
+        var topic = $"pls/v1/patients/{patientId}";
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!_messages.Any(m => m.Topic == topic))
+        {
+            var remaining = deadline - DateTime.UtcNow;
+            Assert.True(remaining > TimeSpan.Zero && await _messageArrived.WaitAsync(remaining),
+                $"MQTT message on {topic} was not received within timeout");
+        }
+        return JsonDocument.Parse(_messages.Last(m => m.Topic == topic).PayloadJson).RootElement;
+    }
+
     private static int FindFreePort()
     {
         using var listener = new TcpListener(System.Net.IPAddress.Loopback, 0);
@@ -348,8 +423,13 @@ public class MqttContractTests : IAsyncLifetime
     private class MqttEnabledFactory : PlsWebAppFactory
     {
         private readonly int _port;
+        private readonly Dictionary<string, string> _extraSettings;
 
-        public MqttEnabledFactory(int port) => _port = port;
+        public MqttEnabledFactory(int port, Dictionary<string, string>? extraSettings = null)
+        {
+            _port = port;
+            _extraSettings = extraSettings ?? [];
+        }
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -358,6 +438,8 @@ public class MqttContractTests : IAsyncLifetime
             builder.UseSetting("Mqtt:Enabled", "true");
             builder.UseSetting("Mqtt:BrokerHost", "localhost");
             builder.UseSetting("Mqtt:BrokerPort", _port.ToString());
+            foreach (var (key, value) in _extraSettings)
+                builder.UseSetting(key, value);
         }
     }
 }

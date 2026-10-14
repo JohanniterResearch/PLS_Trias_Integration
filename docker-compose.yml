@@ -45,6 +45,9 @@ services:
       - Mqtt__ClientId=pls-backend
       - Mqtt__Username=${MQTT_USERNAME:-pls-backend}
       - Mqtt__Password=${MQTT_PASSWORD:-pls-mqtt-password}
+      - Mqtt__RedactName=${MQTT_REDACT_NAME:-true}
+      - Mqtt__RedactLocation=${MQTT_REDACT_LOCATION:-false}
+      # Legacy: true hides both name and location (kept so existing opt-ins stay in effect).
       - Mqtt__RedactPersonalData=${MQTT_REDACT_PERSONAL_DATA:-false}
       # CORS — comma-separated list of allowed origins
       - PLS_ALLOWED_ORIGINS=${ALLOWED_ORIGINS}

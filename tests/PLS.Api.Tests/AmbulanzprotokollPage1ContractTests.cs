@@ -52,7 +52,7 @@ public class AmbulanzprotokollPage1ContractTests
         Assert.NotNull(backendDefaults);
         Assert.True(
             JsonNode.DeepEquals(specStateSchema, backendDefaults),
-            "Backend defaults diverge from docs/specs/ambulanzprotokoll_page1.json stateSchema.");
+            "Backend defaults diverge from specs/ambulanzprotokoll_page1.json stateSchema.");
     }
 
     [Fact]
@@ -261,14 +261,14 @@ public class AmbulanzprotokollPage1ContractTests
 
         while (directory is not null)
         {
-            var candidate = Path.Combine(directory.FullName, "docs", "specs", "ambulanzprotokoll_page1.json");
+            var candidate = Path.Combine(directory.FullName, "specs", "ambulanzprotokoll_page1.json");
             if (File.Exists(candidate))
                 return candidate;
 
             directory = directory.Parent;
         }
 
-        throw new FileNotFoundException("Could not locate docs/specs/ambulanzprotokoll_page1.json from test output directory.");
+        throw new FileNotFoundException("Could not locate specs/ambulanzprotokoll_page1.json from test output directory.");
     }
 
     private async Task<JsonElement> GetFormStateAsync(string token, int patientId)

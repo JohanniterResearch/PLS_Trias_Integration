@@ -5,7 +5,7 @@ publishing) with a React 19 frontend, backed by MySQL.
 
 ## Running
 
-Copy `env.example` to `.env` and fill in all values (see comments in that
+Copy `.env.example` to `.env` and fill in all values (see comments in that
 file for what's required).
 
 Before first run, generate the mosquitto password file (not committed to git):
