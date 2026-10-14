@@ -1,9 +1,24 @@
+# Fixed project name: renaming or re-cloning the folder must not switch to new, empty volumes.
+name: pls
+
+# Docker keeps container logs forever by default; cap them so they cannot fill the disk.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   # One-shot migration job: runs EF migrations and seeds initial data, then exits.
   # pls-app waits for this service to complete successfully before starting.
   db-migrate:
-    build: .
+    # Same image as pls-app (built once); only pls-app has the build section.
+    image: pls-app:local
+    pull_policy: never
+    logging: *logging
     environment:
+      # Explicit: Production is what keeps the seeder from creating the presentation account.
+      - ASPNETCORE_ENVIRONMENT=Production
       - PLS_MIGRATE_ONLY=true
       - ConnectionStrings__DefaultConnection=Server=mysql_db;Port=3306;Database=pls;User=${DB_USER};Password=${DB_PASSWORD}
       - Jwt__Secret=${JWT_SECRET}
@@ -20,6 +35,8 @@ services:
 
   pls-app:
     build: .
+    image: pls-app:local
+    logging: *logging
     ports:
       - "8080:8080"
     environment:
@@ -51,6 +68,10 @@ services:
       - Mqtt__RedactPersonalData=${MQTT_REDACT_PERSONAL_DATA:-false}
       # CORS — comma-separated list of allowed origins
       - PLS_ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+      # Reverse proxy IP(s) allowed to pass on the real client IP (rate limiting); empty = none.
+      - TRUSTED_PROXY=${TRUSTED_PROXY:-}
+      # Logins per minute per client IP. Raise it when many devices share one venue NAT.
+      - RateLimiting__AuthPermitLimit=${LOGIN_RATE_LIMIT:-10}
     depends_on:
       db-migrate:
         condition: service_completed_successfully
@@ -66,6 +87,7 @@ services:
 
   mysql_db:
     image: mysql:8.0
+    logging: *logging
     environment:
       - MYSQL_USER=${DB_USER}
       - MYSQL_PASSWORD=${DB_PASSWORD}
@@ -82,6 +104,7 @@ services:
 
   mosquitto:
     image: eclipse-mosquitto:2
+    logging: *logging
     volumes:
       - ./mosquitto/mosquitto-prod.conf:/mosquitto/config/mosquitto.conf
       - ./mosquitto/acl:/mosquitto/config/acl

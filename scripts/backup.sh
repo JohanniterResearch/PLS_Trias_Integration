@@ -14,7 +14,11 @@ set -euo pipefail
 #
 # Credentials are read from the .env file in the project root.
 # The MySQL service name matches docker-compose.yml: mysql_db
+# BACKUP_KEEP=<n> (environment) keeps only the newest n dumps in OUTPUT_DIR.
 # ---------------------------------------------------------------------------
+
+# Dumps contain patient data: never world-readable.
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -108,6 +112,7 @@ cd "${PROJECT_ROOT}"
 if docker compose exec -T "${MYSQL_SERVICE}" \
     mysqldump \
       --single-transaction \
+      --no-tablespaces \
       --routines \
       --triggers \
       -u"${DB_USER}" \
@@ -116,6 +121,15 @@ if docker compose exec -T "${MYSQL_SERVICE}" \
     | gzip > "${DUMP_FILE}"; then
   DUMP_SIZE="$(du -sh "${DUMP_FILE}" | cut -f1)"
   echo "SUCCESS: Backup written to ${DUMP_FILE} (${DUMP_SIZE})"
+  if [[ -n "${BACKUP_KEEP:-}" ]]; then
+    if [[ ! "${BACKUP_KEEP}" =~ ^[1-9][0-9]*$ ]]; then
+      echo "ERROR: BACKUP_KEEP must be a positive number, got '${BACKUP_KEEP}'." >&2
+      exit 1
+    fi
+    # Timestamped names sort chronologically; delete all but the newest BACKUP_KEEP.
+    find "${OUTPUT_DIR}" -maxdepth 1 -name 'pls_backup_*.sql.gz' -print | sort -r \
+      | tail -n +"$((BACKUP_KEEP + 1))" | xargs -r rm -f --
+  fi
 else
   echo "FAILURE: mysqldump exited with an error. Removing incomplete file." >&2
   rm -f "${DUMP_FILE}"

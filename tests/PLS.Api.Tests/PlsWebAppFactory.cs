@@ -57,6 +57,9 @@ public class PlsWebAppFactory : WebApplicationFactory<Program>, IAsyncLifetime
         builder.UseSetting("Bootstrap:AdminPassword", TestAdminPassword);
         builder.UseSetting("Bootstrap:TestUserUsername", TestUserUsername);
         builder.UseSetting("Bootstrap:TestUserPassword", TestUserPassword);
+        // TestServer requests have no client IP, so every test login shares one rate-limit
+        // bucket. ForwardedHeadersTests covers the real limit.
+        builder.UseSetting("RateLimiting:AuthPermitLimit", "100000");
     }
 
     protected override IHost CreateHost(IHostBuilder builder)

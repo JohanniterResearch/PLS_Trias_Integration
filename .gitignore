@@ -17,6 +17,8 @@ docs/
 .env.*
 !.env.example
 mosquitto/passwd
+# Database dumps (scripts/backup.sh) contain patient data
+backups/
 .serena/
 
 # Node

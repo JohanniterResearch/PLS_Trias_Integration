@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using PLS.Api.Data;
@@ -41,8 +42,12 @@ builder.Services.AddAuthorization(options =>
         policy.RequireClaim("type", "admin", "qr"));
 });
 
-// Rate limiting — auth endpoints: 10 attempts per 60 s per IP.
+// Rate limiting — auth endpoints: 10 attempts per 60 s per IP (RateLimiting:AuthPermitLimit
+// raises it, e.g. when many devices share one venue NAT).
 // Exceeding the limit returns 429 Too Many Requests.
+var authPermitLimit = builder.Configuration.GetValue("RateLimiting:AuthPermitLimit", 10);
+if (authPermitLimit < 1)
+    throw new InvalidOperationException("RateLimiting:AuthPermitLimit must be at least 1.");
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -52,11 +57,33 @@ builder.Services.AddRateLimiter(options =>
             partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
             factory: _ => new FixedWindowRateLimiterOptions
             {
-                PermitLimit = 10,
+                PermitLimit = authPermitLimit,
                 Window = TimeSpan.FromSeconds(60),
                 QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
                 QueueLimit = 0
             }));
+});
+
+// Reverse proxy (e.g. NPMplus): TRUSTED_PROXY is a comma-separated list of proxy IPs. Only
+// requests from those addresses may set the client IP (X-Forwarded-For) and scheme, which the
+// per-IP rate limiting above depends on. Unset: forwarded headers are ignored (direct access).
+var trustedProxies = new List<System.Net.IPAddress>();
+foreach (var entry in (builder.Configuration["TRUSTED_PROXY"] ?? "")
+             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+{
+    if (!System.Net.IPAddress.TryParse(entry, out var proxy))
+        throw new InvalidOperationException($"TRUSTED_PROXY contains an invalid IP address: '{entry}'.");
+    trustedProxies.Add(proxy);
+}
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    // Exactly one hop: the proxy's own entry. Values further left were written by the client.
+    options.ForwardLimit = 1;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+    foreach (var proxy in trustedProxies)
+        options.KnownProxies.Add(proxy);
 });
 
 // Health checks — DB connectivity and MQTT broker state
@@ -154,6 +181,10 @@ if (migrateOnly)
     return;
 }
 
+// First, so rate limiting, HTTPS redirection and logging see the real client IP and scheme.
+if (trustedProxies.Count > 0)
+    app.UseForwardedHeaders();
+
 // Correlation ID — propagate X-Request-ID from callers or generate a new one.
 // The ID is echoed in the response and injected into the log scope so every log
 // line for a request carries the same correlation ID.
@@ -202,12 +233,12 @@ else
     app.UseHttpsRedirection();
 }
 
-app.UseRateLimiter();
-
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
 app.UseRouting();
+// After routing: the limiter reads [EnableRateLimiting] from the selected endpoint.
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 
