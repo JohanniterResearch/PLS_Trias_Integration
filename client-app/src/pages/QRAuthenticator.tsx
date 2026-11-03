@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { useQrScanner } from '../hooks/useQrScanner';
+import CameraFeedback from '../components/CameraFeedback';
 import { qrLogin, userLogin, devLogin } from '../api/endpoints';
 import Appbar from '../components/Appbar';
 
@@ -29,10 +30,9 @@ export default function QRAuthenticator() {
       .catch((error) => console.error('Fetch error:', error));
   };
 
-  const { cameraBlocked, stopScanner } = useQrScanner({
+  const { cameraError, isStarting, retryScanner, stopScanner } = useQrScanner({
     elementId: 'reader',
     fps: 10,
-    qrbox: { width: 450, height: 450 },
     onSuccess: onScanSuccess,
   });
 
@@ -54,7 +54,7 @@ export default function QRAuthenticator() {
       }
     } catch (error) {
       console.error('Login error:', error);
-      setLoginError('Fehler bei der Anmeldung. Bitte versuche es nochmal.');
+      setLoginError('Fehler bei der Anmeldung. Bitte versuchen Sie es erneut.');
     }
   };
 
@@ -92,12 +92,7 @@ export default function QRAuthenticator() {
           />
         </div>
 
-        {cameraBlocked && (
-          <div className="camera-error">
-            Zugriff auf die Kamera wurde verweigert. Bitte erlauben Sie den
-            Kamerazugriff in den Browser-Einstellungen.
-          </div>
-        )}
+        <CameraFeedback error={cameraError} isStarting={isStarting} onRetry={retryScanner} />
 
         <div style={{ marginTop: '20px', width: '100%', maxWidth: '500px' }}>
           <button onClick={() => setShowLogin((v) => !v)} className="btn-secondary">

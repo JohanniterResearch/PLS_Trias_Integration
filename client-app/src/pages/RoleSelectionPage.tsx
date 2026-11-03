@@ -103,7 +103,7 @@ export default function RoleSelectionPage() {
               <div className="form-group">
                 <label>Einsatzort:</label>
                 <select value={selectedOperationScene} onChange={handleOptionChange} required>
-                  <option value="">Wähle einen Einsatzort aus</option>
+                  <option value="">Wählen Sie einen Einsatzort aus</option>
                   {existingOperationScenes.map((scene) => (
                     <option key={scene.idoperationScene} value={scene.idoperationScene}>
                       {scene.name}
