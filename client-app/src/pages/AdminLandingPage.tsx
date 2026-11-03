@@ -32,11 +32,11 @@ export default function AdminLandingPage() {
           navigate('/AdminSettingsPage');
         }
       } else {
-        setError('Benutzername oder Passwort ist falsch. Bitte versuche es erneut.');
+        setError('Benutzername oder Passwort ist falsch. Bitte versuchen Sie es erneut.');
       }
     } catch (error) {
       console.error('Fetch error:', error);
-      setError('Fehler bei der Anmeldung. Bitte versuche es nochmal.');
+      setError('Fehler bei der Anmeldung. Bitte versuchen Sie es erneut.');
     }
   };
 
