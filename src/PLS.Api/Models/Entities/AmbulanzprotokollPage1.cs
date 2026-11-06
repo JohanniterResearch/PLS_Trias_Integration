@@ -6,8 +6,8 @@ public class AmbulanzprotokollPage1
     public int PatientId { get; set; }
     public string FormStateJson { get; set; } = "{}";
     public string Status { get; set; } = "draft";
-    // Server-managed revision for optimistic concurrency: each accepted write
-    // increments it; clients send the revision they based their edit on.
+    // Server-managed revision; retained for clients using optimistic concurrency.
+    // Timestamp-aware clients merge fields through the shared change history.
     public int Revision { get; set; }
     public DateTime? FinalizedAt { get; set; }
     public DateTime? CreatedAt { get; set; }

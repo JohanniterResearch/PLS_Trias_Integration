@@ -1,17 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
-import type { BodyMapMarker, Page1PersistedRecord, Page1RecordStatus, Page1State } from './page1State';
-import {
-  comparePage1UpdatedAt,
-  clearPage1Draft,
-  readPage1Draft,
-  writePage1Draft,
-} from './page1Storage';
+import type { BodyMapMarker, Page1PersistedRecord, Page1RecordStatus, Page1State, PendingPage1Field } from './page1State';
+import { clearPage1Draft, readPage1Draft, writePage1Draft } from './page1Storage';
 import { getPage1, putPage1 } from './page1Api';
 import { createPage1Template, normalizePage1State, page1FinalizeSchema, serializePage1State } from './page1State';
+import { flattenFields, patchFields, pendingPayload } from './page1Changes';
 
 export type Page1SyncState = 'loading' | 'ready' | 'saving' | 'saved-local' | 'saved-server' | 'finalized' | 'error';
-
 export interface UsePage1WorkflowArgs {
   patientId: number;
   operationSceneId: number | null;
@@ -19,10 +14,7 @@ export interface UsePage1WorkflowArgs {
 }
 
 export function useAmbulanzprotokollPage1Workflow({ patientId, operationSceneId, token }: UsePage1WorkflowArgs) {
-  const form = useForm<Page1State>({
-    defaultValues: createPage1Template(),
-    mode: 'onChange',
-  });
+  const form = useForm<Page1State>({ defaultValues: createPage1Template(), mode: 'onChange' });
   const { getValues, reset, setValue, watch } = form;
   const [syncState, setSyncState] = useState<Page1SyncState>('loading');
   const [status, setStatus] = useState<Page1RecordStatus>('draft');
@@ -30,274 +22,213 @@ export function useAmbulanzprotokollPage1Workflow({ patientId, operationSceneId,
   const [source, setSource] = useState<'local' | 'server' | 'empty'>('empty');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [validationWarnings, setValidationWarnings] = useState<string[]>([]);
-  const [isHydrated, setIsHydrated] = useState(false);
   const [currentRecord, setCurrentRecord] = useState<Page1PersistedRecord | null>(null);
-  const [watchedState, setWatchedState] = useState<Page1State>(() => getValues());
-  const saveTimerRef = useRef<number | null>(null);
-  const pendingServerSyncRef = useRef(false);
+  const [watchedState, setWatchedState] = useState<Page1State>(createPage1Template);
+  const pending = useRef<Record<string, PendingPage1Field>>({});
+  const finalizeAt = useRef<string | null>(null);
+  const state = useRef(createPage1Template());
+  const statusRef = useRef<Page1RecordStatus>('draft');
+  const hydrated = useRef(false);
+  const generation = useRef(0);
+  const applying = useRef(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inFlight = useRef<Promise<void> | null>(null);
 
-  useEffect(() => {
-    const subscription = watch((value) => setWatchedState(value as Page1State));
-    return () => subscription.unsubscribe();
-  }, [watch]);
+  const replaceState = useCallback((next: Page1State) => {
+    applying.current = true;
+    state.current = structuredClone(next);
+    reset(next);
+    setWatchedState(next);
+    applying.current = false;
+  }, [reset]);
 
-  const persistLocal = useCallback((formState: Page1State, nextStatus: Page1RecordStatus, updatedAt: string, finalizedAt: string | null) => {
-    const normalizedFormState = normalizePage1State(formState);
+  const persistLocal = useCallback(() => {
+    const changedAt = Object.values(pending.current).map(p => p.changedAt).sort().at(-1) ?? finalizeAt.current ?? new Date().toISOString();
     const record: Page1PersistedRecord = {
-      patientId,
-      operationSceneId,
-      status: nextStatus,
-      updatedAt,
-      finalizedAt,
-      formState: normalizedFormState,
+      patientId, operationSceneId, formState: state.current,
+      status: statusRef.current, updatedAt: changedAt, finalizedAt: finalizeAt.current,
+      pendingFields: pending.current, pendingFinalizeAt: finalizeAt.current,
     };
-
     writePage1Draft(record);
     setCurrentRecord(record);
-    setLastSavedAt(updatedAt);
-    setStatus(nextStatus);
+    setLastSavedAt(changedAt);
     setSource('local');
   }, [operationSceneId, patientId]);
 
-  const setBodyMap = useCallback((value: BodyMapMarker[]) => {
-    setValue('assessment_secondary.bodymap', value, { shouldDirty: true, shouldTouch: true });
-    setWatchedState(normalizePage1State(getValues()));
-  }, [getValues, setValue]);
-
-  const setSignature = useCallback((value: string | null) => {
-    setValue('signatures.entlass_san_na', value, { shouldDirty: true, shouldTouch: true });
-    setWatchedState(normalizePage1State(getValues()));
-  }, [getValues, setValue]);
+  const flush = useCallback(async (): Promise<void> => {
+    // Serialize requests; edits made during a request remain in the next batch.
+    while (inFlight.current) await inFlight.current;
+    if (!hydrated.current || (!Object.keys(pending.current).length && !finalizeAt.current)) return;
+    if (!token) { setSyncState('saved-local'); return; }
+    const currentGeneration = generation.current;
+    const batch = { ...pending.current };
+    const requestedFinalizeAt = finalizeAt.current;
+    const payload = pendingPayload(batch, requestedFinalizeAt);
+    const send = async () => {
+      setSyncState('saving');
+      try {
+        const { data } = await putPage1(patientId, payload, token);
+        if (currentGeneration !== generation.current) return;
+        for (const [path, entry] of Object.entries(batch)) {
+          if (pending.current[path] === entry) delete pending.current[path];
+        }
+        const hasRejectedChanges = Boolean(data?.rejectedChanges?.length);
+        // A conflict also cancels finalization queued while this request was in flight.
+        if (hasRejectedChanges || finalizeAt.current === requestedFinalizeAt) finalizeAt.current = null;
+        const nextStatus = data?.status ?? payload.status;
+        statusRef.current = finalizeAt.current ? 'finalized' : nextStatus;
+        setStatus(statusRef.current);
+        // The server returns the canonical merged state, including winning remote values.
+        const canonical = normalizePage1State(data?.formState ?? state.current);
+        replaceState(patchFields(canonical, pending.current));
+        if (hasRejectedChanges) setErrorMessage('Einige Änderungen wurden verworfen. Bitte den gültigen Stand prüfen und bei Bedarf erneut finalisieren.');
+        else setErrorMessage(null);
+        if (nextStatus === 'finalized') {
+          pending.current = {};
+          clearPage1Draft(patientId);
+          setCurrentRecord(data ? { ...data, operationSceneId } : null);
+        } else persistLocal();
+        setLastSavedAt(data?.updatedAt ?? payload.changedAt);
+        setSource('server');
+        setSyncState(nextStatus === 'finalized' ? 'finalized' : 'saved-server');
+      } catch (error) {
+        if (currentGeneration !== generation.current) return;
+        // A finalized server record is immutable; do not keep retrying its rejected edits.
+        const response = typeof error === 'object' && error !== null && 'response' in error
+          ? error.response as { status?: number; data?: { rejectedChanges?: unknown[] } } : undefined;
+        const hasRejectedChanges = Boolean(response?.data?.rejectedChanges?.length);
+        if (hasRejectedChanges) {
+          finalizeAt.current = null;
+          statusRef.current = 'draft';
+          setStatus('draft');
+        }
+        if (response?.status === 409) {
+          try {
+            const { data } = await getPage1(patientId, token);
+            if (currentGeneration !== generation.current) return;
+            if (data?.status === 'finalized') {
+              pending.current = {};
+              finalizeAt.current = null;
+              statusRef.current = 'finalized';
+              setStatus('finalized');
+              replaceState(normalizePage1State(data.formState));
+              clearPage1Draft(patientId);
+              setCurrentRecord({ ...data, operationSceneId });
+              setSource('server');
+              setSyncState('finalized');
+              setErrorMessage('Protokoll ist bereits finalisiert. Der gespeicherte Stand wurde geladen.');
+              return;
+            }
+          } catch { /* Keep the local edits if loading the canonical state fails. */ }
+        }
+        persistLocal();
+        setSyncState('saved-local');
+        setErrorMessage(hasRejectedChanges
+          ? 'Änderungen wurden verworfen. Bitte Angaben prüfen und erneut finalisieren.'
+          : error instanceof Error ? error.message : 'Lokal gespeichert; Server-Sync ausstehend');
+      }
+    };
+    inFlight.current = send();
+    try { await inFlight.current; } finally { inFlight.current = null; }
+  }, [operationSceneId, patientId, persistLocal, replaceState, token]);
 
   useEffect(() => {
     let cancelled = false;
-
+    const currentGeneration = ++generation.current;
+    hydrated.current = false;
+    pending.current = {};
+    finalizeAt.current = null;
     async function hydrate() {
       setSyncState('loading');
-      setErrorMessage(null);
-
-      const localRecord = readPage1Draft(patientId);
-
+      const local = readPage1Draft(patientId);
       try {
-        const { data: serverRecord } = await getPage1(patientId, token ?? undefined);
-
+        const { data: server } = await getPage1(patientId, token ?? undefined);
         if (cancelled) return;
-
-        const chosenRecord = chooseNewestRecord(localRecord, serverRecord);
-        const nextState = chosenRecord?.formState ? normalizePage1State(chosenRecord.formState) : createPage1Template();
-        reset(nextState);
-        setIsHydrated(true);
-        setCurrentRecord(chosenRecord ?? null);
-
-        if (chosenRecord) {
-          setStatus(chosenRecord.status);
-          setLastSavedAt(chosenRecord.updatedAt);
-          setSource(chosenRecord === localRecord ? 'local' : 'server');
-        } else {
-          setStatus('draft');
-          setLastSavedAt(null);
-          setSource('empty');
+        const base = normalizePage1State(server?.formState ?? createPage1Template());
+        pending.current = local?.pendingFields ?? {};
+        finalizeAt.current = local?.pendingFinalizeAt ?? null;
+        // Upgrade old local drafts once; retain their original edit time.
+        if (local && !local.pendingFields && local.updatedAt && (!server?.updatedAt || local.updatedAt > server.updatedAt)) {
+          const before = flattenFields(base);
+          for (const [path, value] of Object.entries(flattenFields(normalizePage1State(local.formState)))) {
+            if (JSON.stringify(value) !== JSON.stringify(before[path])) pending.current[path] = { value, changedAt: local.updatedAt };
+          }
+          if (local.status === 'finalized') finalizeAt.current = local.finalizedAt ?? local.updatedAt;
         }
-
+        const hasLocal = Object.keys(pending.current).length > 0 || !!finalizeAt.current;
+        statusRef.current = server?.status === 'finalized' ? 'finalized' : finalizeAt.current ? 'finalized' : 'draft';
+        setStatus(statusRef.current);
+        // Pending edits must reach the API for audit even if another device finalized meanwhile.
+        replaceState(server?.status === 'finalized' ? base : patchFields(base, pending.current));
+        setCurrentRecord(hasLocal ? local : server ? { ...server, operationSceneId } : null);
+        setLastSavedAt(hasLocal ? local?.updatedAt ?? null : server?.updatedAt ?? null);
+        setSource(hasLocal ? 'local' : server ? 'server' : 'empty');
         setSyncState('ready');
       } catch (error) {
         if (cancelled) return;
-
-        const fallback = localRecord?.formState ? normalizePage1State(localRecord.formState) : createPage1Template();
-        reset(fallback);
-        setIsHydrated(true);
-        setCurrentRecord(localRecord ?? null);
-        setStatus(localRecord?.status ?? 'draft');
-        setLastSavedAt(localRecord?.updatedAt ?? null);
-        setSource(localRecord ? 'local' : 'empty');
-        setErrorMessage(error instanceof Error ? error.message : 'Fehler beim Laden des Ambulanzprotokolls');
+        pending.current = local?.pendingFields ?? {};
+        finalizeAt.current = local?.pendingFinalizeAt ?? null;
+        replaceState(normalizePage1State(local?.formState ?? createPage1Template()));
+        statusRef.current = local?.status ?? 'draft';
+        setStatus(statusRef.current);
+        setCurrentRecord(local);
+        setSource(local ? 'local' : 'empty');
+        setErrorMessage(error instanceof Error ? error.message : 'Fehler beim Laden');
         setSyncState('error');
       }
+      hydrated.current = true;
     }
-
     void hydrate();
-
-    return () => {
-      cancelled = true;
-      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
-    };
-  }, [patientId, reset, token]);
+    return () => { cancelled = true; generation.current = currentGeneration + 1; hydrated.current = false; if (timer.current) clearTimeout(timer.current); };
+  }, [operationSceneId, patientId, replaceState, token]);
 
   useEffect(() => {
-    if (!isHydrated || !watchedState) return;
-
-    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = window.setTimeout(() => {
-      const nextValue = normalizePage1State(watchedState as Page1State);
-      const updatedAt = new Date().toISOString();
-      const nextStatus = status === 'finalized' ? 'finalized' as const : 'draft' as const;
-      const nextFinalizedAt = nextStatus === 'finalized' ? currentRecord?.finalizedAt ?? updatedAt : null;
-      persistLocal(nextValue, nextStatus, updatedAt, nextFinalizedAt);
-      setSyncState('saving');
-
-      if (!token) {
-        pendingServerSyncRef.current = true;
-        setSyncState('saved-local');
-        return;
+    const subscription = watch((value) => {
+      if (!hydrated.current || applying.current || statusRef.current === 'finalized') return;
+      // react-hook-form may mutate nested objects; compare against an independent snapshot.
+      const next = structuredClone(normalizePage1State(value as Page1State));
+      const before = flattenFields(state.current);
+      const changedAt = new Date().toISOString();
+      for (const [path, entry] of Object.entries(flattenFields(next))) {
+        if (JSON.stringify(entry) !== JSON.stringify(before[path])) pending.current[path] = { value: entry, changedAt };
       }
-
-      void putPage1(patientId, {
-        formState: nextValue,
-        status: nextStatus,
-      }, token)
-        .then(({ data }) => {
-          pendingServerSyncRef.current = false;
-          const serverRecord = data
-            ? attachLocalContext(data, operationSceneId)
-            : {
-                patientId,
-                operationSceneId,
-                status: nextStatus,
-                updatedAt,
-                finalizedAt: nextFinalizedAt,
-                formState: nextValue,
-              };
-          persistLocal(serverRecord.formState, serverRecord.status, serverRecord.updatedAt ?? updatedAt, serverRecord.finalizedAt);
-          setSource('server');
-          setSyncState('saved-server');
-        })
-        .catch(() => {
-          setSyncState('saved-local');
-          pendingServerSyncRef.current = true;
-        });
-    }, 800);
-
-    return () => {
-      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
-    };
-  }, [currentRecord?.finalizedAt, isHydrated, operationSceneId, patientId, persistLocal, status, token, watchedState]);
+      state.current = next;
+      setWatchedState(next);
+      persistLocal();
+    });
+    return () => subscription.unsubscribe();
+  }, [persistLocal, watch]);
 
   useEffect(() => {
-    function handleOnline() {
-      if (!pendingServerSyncRef.current || !token || !isHydrated) return;
-      const currentState = normalizePage1State(getValues());
-      const updatedAt = new Date().toISOString();
-      const pendingStatus = currentRecord?.status ?? status;
-      const pendingFinalizedAt = pendingStatus === 'finalized' ? currentRecord?.finalizedAt ?? updatedAt : null;
-      setSyncState('saving');
-      void putPage1(patientId, {
-        formState: currentState,
-        status: pendingStatus,
-      }, token)
-        .then(({ data }) => {
-          pendingServerSyncRef.current = false;
-          const rec = data
-            ? attachLocalContext(data, operationSceneId)
-            : {
-                patientId,
-                operationSceneId,
-                status: pendingStatus,
-                updatedAt,
-                finalizedAt: pendingFinalizedAt,
-                formState: currentState,
-              };
-          persistLocal(rec.formState, rec.status, rec.updatedAt ?? updatedAt, rec.finalizedAt);
-          setSource('server');
-          setSyncState('saved-server');
-        })
-        .catch(() => setSyncState('saved-local'));
-    }
+    if (timer.current) clearTimeout(timer.current);
+    if (hydrated.current && (Object.keys(pending.current).length || finalizeAt.current)) timer.current = setTimeout(() => void flush(), 800);
+    return () => { if (timer.current) clearTimeout(timer.current); };
+  }, [flush, watchedState]);
 
-    function handleOffline() {
-      pendingServerSyncRef.current = true;
-      setSyncState((prev) =>
-        prev === 'saving' || prev === 'saved-server' || prev === 'ready' ? 'saved-local' : prev,
-      );
-    }
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, [currentRecord, getValues, isHydrated, operationSceneId, patientId, persistLocal, status, token]);
+  useEffect(() => {
+    const online = () => void flush();
+    window.addEventListener('online', online);
+    return () => window.removeEventListener('online', online);
+  }, [flush]);
 
   const finalize = async () => {
+    if (statusRef.current === 'finalized' && !finalizeAt.current) return;
     const validState = normalizePage1State(getValues());
     const validation = page1FinalizeSchema.safeParse(validState);
-    const finalState = validation.success ? normalizePage1State(validation.data) : validState;
-    setValidationWarnings(validation.success
-      ? []
-      : validation.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`));
-    const finalizedAt = new Date().toISOString();
-    const updatedAt = finalizedAt;
-
-    setSyncState('saving');
-    setErrorMessage(null);
-
-    try {
-      const { data } = await putPage1(patientId, {
-        formState: finalState,
-        status: 'finalized',
-      }, token ?? undefined);
-
-      const finalRecord: Page1PersistedRecord = data
-        ? attachLocalContext(data, operationSceneId)
-        : {
-            patientId,
-            operationSceneId,
-            status: 'finalized',
-            updatedAt,
-            finalizedAt,
-            formState: finalState,
-          };
-
-      clearPage1Draft(patientId);
-      setCurrentRecord(finalRecord);
-      setStatus('finalized');
-      setLastSavedAt(finalRecord.updatedAt ?? updatedAt);
-      setSource('server');
-      setSyncState('finalized');
-    } catch (error) {
-      pendingServerSyncRef.current = true;
-      persistLocal(finalState, 'finalized', updatedAt, finalizedAt);
-      setErrorMessage(error instanceof Error ? error.message : 'Finalisierung lokal gespeichert; Server-Sync ausstehend');
-      setSyncState('saved-local');
-    }
+    setValidationWarnings(validation.success ? [] : validation.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`));
+    finalizeAt.current ??= new Date().toISOString();
+    statusRef.current = 'finalized';
+    setStatus('finalized');
+    persistLocal();
+    await flush();
   };
 
-  const exportJson = useMemo(
-    () => serializePage1State(normalizePage1State(watchedState as Page1State)),
-    [watchedState],
-  );
-
-  return {
-    form,
-    finalize,
-    exportJson,
-    syncState,
-    status,
-    source,
-    lastSavedAt,
-    errorMessage,
-    validationWarnings,
-    currentRecord,
-    setBodyMap,
-    setSignature,
-  };
-}
-
-function chooseNewestRecord(
-  localRecord: Page1PersistedRecord | null,
-  serverRecord: Page1PersistedRecord | null,
-) {
-  if (!localRecord) return serverRecord;
-  if (!serverRecord) return localRecord;
-  return comparePage1UpdatedAt(localRecord.updatedAt, serverRecord.updatedAt) >= 0 ? localRecord : serverRecord;
-}
-
-function attachLocalContext(
-  serverRecord: Omit<Page1PersistedRecord, 'operationSceneId'>,
-  operationSceneId: number | null,
-): Page1PersistedRecord {
-  return {
-    ...serverRecord,
-    operationSceneId,
-  };
+  const setBodyMap = useCallback((value: BodyMapMarker[]) => {
+    setValue('assessment_secondary.bodymap', value, { shouldDirty: true, shouldTouch: true });
+  }, [setValue]);
+  const setSignature = useCallback((value: string | null) => {
+    setValue('signatures.entlass_san_na', value, { shouldDirty: true, shouldTouch: true });
+  }, [setValue]);
+  const exportJson = useMemo(() => serializePage1State(watchedState), [watchedState]);
+  return { form, finalize, exportJson, syncState, status, source, lastSavedAt, errorMessage, validationWarnings, currentRecord, setBodyMap, setSignature };
 }

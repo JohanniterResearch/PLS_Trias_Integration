@@ -128,7 +128,15 @@ export interface Page1State {
 
 export type Page1RecordStatus = 'draft' | 'finalized';
 
+export interface PendingPage1Field {
+  value: unknown;
+  changedAt: string;
+}
+
 export interface Page1PersistedRecord {
+  pendingFields?: Record<string, PendingPage1Field>;
+  pendingFinalizeAt?: string | null;
+  rejectedChanges?: import('../../api/changeMetadata').RejectedChange[];
   patientId: number;
   operationSceneId?: number | null;
   status: Page1RecordStatus;
