@@ -211,6 +211,67 @@ namespace PLS.Api.Migrations
                         });
                 });
 
+            modelBuilder.Entity("PLS.Api.Models.Entities.PatientChange", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<bool>("Accepted")
+                        .HasColumnType("tinyint(1)")
+                        .HasColumnName("accepted");
+
+                    b.Property<string>("ActorId")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .HasColumnName("actor_id");
+
+                    b.Property<DateTime>("ChangedAt")
+                        .HasColumnType("datetime(6)")
+                        .HasColumnName("changed_at");
+
+                    b.Property<string>("DeviceId")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)")
+                        .HasColumnName("device_id");
+
+                    b.Property<int>("FieldId")
+                        .HasColumnType("int")
+                        .HasColumnName("field_id");
+
+                    b.Property<int>("PatientId")
+                        .HasColumnType("int")
+                        .HasColumnName("patient_id");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)")
+                        .HasColumnName("reason");
+
+                    b.Property<DateTime>("ReceivedAt")
+                        .HasColumnType("datetime(6)")
+                        .HasColumnName("received_at");
+
+                    b.Property<string>("Value")
+                        .IsRequired()
+                        .HasColumnType("json")
+                        .HasColumnName("value");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PatientId", "Id");
+
+                    b.HasIndex("PatientId", "FieldId", "ChangedAt");
+
+                    b.HasIndex("PatientId", "FieldId", "Accepted", "ChangedAt");
+
+                    b.ToTable("patient_changes", (string)null);
+                });
+
             modelBuilder.Entity("PLS.Api.Models.Entities.Person", b =>
                 {
                     b.Property<int>("Id")
@@ -480,6 +541,15 @@ namespace PLS.Api.Migrations
                         .OnDelete(DeleteBehavior.SetNull);
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("PLS.Api.Models.Entities.PatientChange", b =>
+                {
+                    b.HasOne("PLS.Api.Models.Entities.Patient", null)
+                        .WithMany()
+                        .HasForeignKey("PatientId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("PLS.Api.Models.Entities.QrCodeLoginHasUser", b =>

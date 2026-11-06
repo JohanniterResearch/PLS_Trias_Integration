@@ -23,11 +23,13 @@ public class PersonenV2Controller : ControllerBase
 {
     private readonly PlsDbContext _context;
     private readonly MqttPublishService _mqttService;
+    private readonly PatientChangeService _changes;
 
-    public PersonenV2Controller(PlsDbContext context, MqttPublishService mqttService)
+    public PersonenV2Controller(PlsDbContext context, MqttPublishService mqttService, PatientChangeService changes)
     {
         _context = context;
         _mqttService = mqttService;
+        _changes = changes;
     }
 
     /// <summary>Returns all patients for the given operation scene.</summary>
@@ -78,60 +80,64 @@ public class PersonenV2Controller : ControllerBase
         if (!await SceneAccess.CanAccessPatientAsync(_context, User, id))
             return Forbid();
 
-        var patient = await _context.Patients.FirstOrDefaultAsync(p => p.Id == id);
-        if (patient == null)
-            return NotFound(new { message = "Person nicht gefunden" });
-
         if (!TriageColor.TryNormalize(request.triageColor, out var normalizedTriageColor))
             return BadRequest(new { message = "Ungültige Triagefarbe", allowedValues = TriageColor.AllowedValues });
 
-        if (request.triageColor != null) patient.Triagefarbe = normalizedTriageColor;
-        if (request.respiration.HasValue) patient.Atmung = request.respiration.Value;
-        if (request.blutung.HasValue) patient.Blutung = request.blutung.Value;
-
-        await _context.SaveChangesAsync();
-        await _mqttService.PublishPatientStateAsync(id);
-
-        return Ok(CreatePatientResponse(patient));
+        var result = await _changes.ExecuteAsync(id, async patient =>
+        {
+            var session = _changes.Start(id, request, User);
+            if (request.triageColor != null && await session.ApplyAsync("patient.triagefarbe", patient.Triagefarbe, normalizedTriageColor, patient.CreatedAt))
+                patient.Triagefarbe = normalizedTriageColor;
+            if (request.respiration.HasValue && await session.ApplyAsync("patient.atmung", patient.Atmung, request.respiration.Value, patient.CreatedAt))
+                patient.Atmung = request.respiration.Value;
+            if (request.blutung.HasValue && await session.ApplyAsync("patient.blutung", patient.Blutung, request.blutung.Value, patient.CreatedAt))
+                patient.Blutung = request.blutung.Value;
+            await _context.SaveChangesAsync();
+            return Ok(CreatePatientResponse(patient, session.Rejected));
+        });
+        if (result is OkObjectResult) await _mqttService.PublishPatientStateAsync(id);
+        return result;
     }
 
-    /// <summary>Updates respiration status for a patient.</summary>
+    /// <summary>Updates respiration independently from other fields.</summary>
     [Authorize(Policy = "TriageWrite")]
     [HttpPost("api/v2/persons/{id}/respiration")]
     public async Task<IActionResult> UpdateRespiration(int id, [FromBody] UpdateRespirationV2Request request)
     {
-        if (!await SceneAccess.CanAccessPatientAsync(_context, User, id))
-            return Forbid();
-
-        var patient = await _context.Patients.FirstOrDefaultAsync(p => p.Id == id);
-        if (patient == null)
-            return NotFound(new { message = "Person nicht gefunden" });
-
-        patient.Atmung = request.respiration;
-        await _context.SaveChangesAsync();
-        await _mqttService.PublishPatientStateAsync(id);
-
-        return Ok(CreatePatientResponse(patient));
+        if (!await SceneAccess.CanAccessPatientAsync(_context, User, id)) return Forbid();
+        var result = await _changes.ExecuteAsync(id, async patient =>
+        {
+            var session = _changes.Start(id, request, User);
+            if (await session.ApplyAsync("patient.atmung", patient.Atmung, request.respiration!.Value, patient.CreatedAt))
+                patient.Atmung = request.respiration.Value;
+            await _context.SaveChangesAsync();
+            return Ok(CreatePatientResponse(patient, session.Rejected));
+        });
+        if (result is OkObjectResult) await _mqttService.PublishPatientStateAsync(id);
+        return result;
     }
 
-    /// <summary>Updates patient geolocation independently from other triage writes.</summary>
+    /// <summary>Latitude/longitude form one location field so coordinates cannot be mixed.</summary>
     [Authorize(Policy = "TriageWrite")]
     [HttpPost("api/v2/persons/{id}/location")]
     public async Task<IActionResult> UpdateLocation(int id, [FromBody] UpdatePatientLocationV2Request request)
     {
-        if (!await SceneAccess.CanAccessPatientAsync(_context, User, id))
-            return Forbid();
-
-        var patient = await _context.Patients.FirstOrDefaultAsync(p => p.Id == id);
-        if (patient == null)
-            return NotFound(new { message = "Person nicht gefunden" });
-
-        patient.LongitudePatient = request.lng;
-        patient.LatitudePatient = request.lat;
-        await _context.SaveChangesAsync();
-        await _mqttService.PublishPatientStateAsync(id);
-
-        return Ok(CreatePatientResponse(patient));
+        if (!await SceneAccess.CanAccessPatientAsync(_context, User, id)) return Forbid();
+        var result = await _changes.ExecuteAsync(id, async patient =>
+        {
+            var session = _changes.Start(id, request, User);
+            if (await session.ApplyAsync("patient.location",
+                new { lat = patient.LatitudePatient, lng = patient.LongitudePatient },
+                new { lat = request.lat, lng = request.lng }, patient.CreatedAt))
+            {
+                patient.LatitudePatient = request.lat;
+                patient.LongitudePatient = request.lng;
+            }
+            await _context.SaveChangesAsync();
+            return Ok(CreatePatientResponse(patient, session.Rejected));
+        });
+        if (result is OkObjectResult) await _mqttService.PublishPatientStateAsync(id);
+        return result;
     }
 
     /// <summary>
@@ -237,63 +243,75 @@ public class PersonenV2Controller : ControllerBase
         if (request.Status is not ("draft" or "finalized"))
             return BadRequest(new { message = "Ungültiger Status" });
 
-        var mergedFormState = request.FormState.ValueKind == JsonValueKind.Undefined
-            ? AmbulanzprotokollPage1Defaults.DefaultFormState
-            : AmbulanzprotokollPage1Defaults.MergeWithDefaultFormState(request.FormState.GetRawText());
+        var incoming = request.FormState.ValueKind == JsonValueKind.Undefined
+            ? new JsonObject() : JsonNode.Parse(request.FormState.GetRawText()) as JsonObject;
+        if (incoming == null) return BadRequest(new { message = "formState muss ein Objekt sein" });
+        var fields = ChangeFields.Flatten(incoming).ToList();
+        if (fields.Any(f => !ChangeFields.Ids.ContainsKey("form." + f.Path)))
+            return BadRequest(new { message = "Unbekanntes Formularfeld" });
 
-        // Read-check-write under a row lock so two concurrent PUTs on the same revision
-        // can't both pass the check and silently clobber each other (lost update) —
-        // same pattern as VerifyPatientQrCode's FOR UPDATE claim above.
-        var strategy = _context.Database.CreateExecutionStrategy();
-        return await strategy.ExecuteAsync<IActionResult>(async () =>
+        return await _changes.ExecuteAsync(patientId, async patient =>
         {
-            await using var transaction = await _context.Database.BeginTransactionAsync();
+            var form = await _context.AmbulanzprotokollPage1Forms.FirstOrDefaultAsync(f => f.PatientId == patientId);
+            var current = JsonNode.Parse(AmbulanzprotokollPage1Defaults.MergeWithDefaultFormState(form?.FormStateJson))!.AsObject();
+            var session = _changes.Start(patientId, request, User);
 
-            var form = await _context.AmbulanzprotokollPage1Forms
-                .FromSqlInterpolated($"SELECT * FROM patient_ambulanzprotokoll_page1 WHERE patient_id = {patientId} FOR UPDATE")
-                .AsTracking()
-                .FirstOrDefaultAsync();
+            // Legacy revision checks remain supported. Timestamp-aware clients merge individual fields.
+            if (form != null && request.ChangedAt == null && request.FieldChangedAt == null &&
+                request.ExpectedRevision != null && request.ExpectedRevision != form.Revision)
+            {
+                foreach (var field in fields)
+                    await session.ApplyAsync("form." + field.Path, ChangeFields.Get(current, field.Path), field.Value, patient.CreatedAt, "stale_revision");
+                return Conflict(new { message = "Veralteter Bearbeitungsstand", revision = form.Revision, rejectedChanges = session.Rejected });
+            }
 
             if (form?.FinalizedAt != null)
             {
-                // Finalized records are immutable: an identical re-submit is idempotent
-                // (returns the stored record, timestamp unchanged), any change — content
-                // or status — is rejected, regardless of what status the caller sent.
-                // Structural comparison, not raw string equality — MySQL's JSON column
-                // reformats stored JSON (key order/whitespace) on round-trip.
-                if (request.Status != "finalized" ||
-                    !JsonNode.DeepEquals(JsonNode.Parse(form.FormStateJson), JsonNode.Parse(mergedFormState)))
-                    return Conflict(new { message = "Protokoll ist bereits finalisiert", revision = form.Revision });
-
+                foreach (var field in fields)
+                    await session.ApplyAsync("form." + field.Path, ChangeFields.Get(current, field.Path), field.Value, patient.CreatedAt, "finalized");
+                if (request.Status != "finalized")
+                    await session.ApplyAsync("form.status", form.Status, request.Status, patient.CreatedAt, "finalized");
+                if (session.Rejected.Count > 0)
+                    return Conflict(new { message = "Protokoll ist bereits finalisiert", revision = form.Revision, rejectedChanges = session.Rejected });
                 return Ok(CreateResponse(patientId, form.Status, form.FormStateJson, form.UpdatedAt, form.FinalizedAt, form.Revision));
             }
 
-            if (form != null && request.ExpectedRevision != null && request.ExpectedRevision != form.Revision)
-                return Conflict(new { message = "Veralteter Bearbeitungsstand", revision = form.Revision });
-
             if (form == null)
             {
-                form = new AmbulanzprotokollPage1
-                {
-                    PatientId = patientId
-                };
+                form = new AmbulanzprotokollPage1 { PatientId = patientId };
                 _context.AmbulanzprotokollPage1Forms.Add(form);
             }
+            var changed = form.Id == 0;
+            foreach (var field in fields)
+            {
+                if (await session.ApplyAsync("form." + field.Path, ChangeFields.Get(current, field.Path), field.Value, patient.CreatedAt))
+                {
+                    ChangeFields.Set(current, field.Path, field.Value);
+                    changed = true;
+                }
+            }
 
-            form.Status = request.Status;
-            form.FormStateJson = mergedFormState;
-            form.FinalizedAt = request.Status == "finalized" ? DateTime.UtcNow : null;
-            form.Revision++;
-
+            // Do not finalize a merged document while some of the submitted edits were rejected.
+            if (request.Status == "finalized" && session.Rejected.Count == 0 &&
+                await session.ApplyAsync("form.status", form.Status, request.Status, patient.CreatedAt))
+            {
+                form.Status = "finalized";
+                form.FinalizedAt = DateTime.UtcNow;
+                changed = true;
+            }
+            if (changed)
+            {
+                form.FormStateJson = current.ToJsonString();
+                form.Revision++;
+            }
             await _context.SaveChangesAsync();
-            await transaction.CommitAsync();
-
-            return Ok(CreateResponse(patientId, form.Status, form.FormStateJson, form.UpdatedAt, form.FinalizedAt, form.Revision));
+            return Ok(CreateResponse(patientId, form.Status, form.FormStateJson, form.UpdatedAt, form.FinalizedAt, form.Revision, session.Rejected));
         });
     }
 
-    private static object CreatePatientResponse(Patient patient) => new
+    private static object CreatePatientResponse(Patient patient, IReadOnlyList<RejectedChange>? rejected = null) => new
     {
+        rejectedChanges = rejected ?? [],
         idpatient = patient.Id,
         atmung = patient.Atmung,
         blutung = patient.Blutung,
@@ -316,7 +334,8 @@ public class PersonenV2Controller : ControllerBase
         string formStateJson,
         DateTime? updatedAt,
         DateTime? finalizedAt,
-        int revision)
+        int revision,
+        IReadOnlyList<RejectedChange>? rejected = null)
     {
         using var document = JsonDocument.Parse(formStateJson);
 
@@ -327,6 +346,7 @@ public class PersonenV2Controller : ControllerBase
             FormState = document.RootElement.Clone(),
             UpdatedAt = updatedAt,
             FinalizedAt = finalizedAt,
+            RejectedChanges = rejected?.Count > 0 ? rejected : null,
             Revision = revision
         };
     }

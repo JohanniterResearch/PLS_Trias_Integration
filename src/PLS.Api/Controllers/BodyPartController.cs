@@ -13,11 +13,13 @@ public class BodyPartController : ControllerBase
 {
     private readonly PlsDbContext _context;
     private readonly MqttPublishService _mqttService;
+    private readonly PatientChangeService _changes;
 
-    public BodyPartController(PlsDbContext context, MqttPublishService mqttService)
+    public BodyPartController(PlsDbContext context, MqttPublishService mqttService, PatientChangeService changes)
     {
         _context = context;
         _mqttService = mqttService;
+        _changes = changes;
     }
 
     [Authorize(Policy = "TriageWrite")]
@@ -30,16 +32,21 @@ public class BodyPartController : ControllerBase
         if (!await SceneAccess.CanAccessPatientAsync(_context, User, request.idpatient))
             return Forbid();
 
-        var body = await _context.Bodies.FirstOrDefaultAsync(b => b.IdPatient == request.idpatient);
-        if (body == null)
-            return NotFound(new { error = "Body record not found" });
-
-        body.BodyParts[request.bodyPartId] = request.isClicked;
-        await _context.SaveChangesAsync();
-
-        await _mqttService.PublishPatientStateAsync(request.idpatient);
-
-        return Ok(new { message = "Body part saved successfully" });
+        var result = await _changes.ExecuteAsync(request.idpatient, async patient =>
+        {
+            var body = await _context.Bodies.FirstOrDefaultAsync(b => b.IdPatient == request.idpatient);
+            if (body == null) return NotFound(new { error = "Body record not found" });
+            var session = _changes.Start(request.idpatient, request, User);
+            if (await session.ApplyAsync("body." + request.bodyPartId, body.BodyParts.GetValueOrDefault(request.bodyPartId), request.isClicked!.Value, patient.CreatedAt))
+                body.BodyParts[request.bodyPartId] = request.isClicked.Value;
+            return Ok(new
+            {
+                message = "Body part processed", rejectedChanges = session.Rejected,
+                bodyPartId = request.bodyPartId, isClicked = body.BodyParts.GetValueOrDefault(request.bodyPartId)
+            });
+        });
+        if (result is OkObjectResult) await _mqttService.PublishPatientStateAsync(request.idpatient);
+        return result;
     }
 
     [Authorize(Policy = "TriageWrite")]

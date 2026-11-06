@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import BodyPart from '../components/BodyPartsFront';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
@@ -6,6 +6,7 @@ import { saveBodyPart, getBodyParts } from '../api/endpoints';
 
 const ShowBodyFront = () => {
   const [bodyParts, setBodyParts] = useState<Record<string, number | boolean>>({});
+  const requestVersions = useRef<Record<string, number>>({});
   const navigate = useNavigate();
   const { token } = useAuthStore();
   const location = useLocation();
@@ -16,9 +17,14 @@ const ShowBodyFront = () => {
   const [isLoading, setIsLoading] = useState(true);
 
   const handleBodyPartClick = async (id: string, isClicked: number | boolean) => {
-    setBodyParts({ ...bodyParts, [id]: isClicked });
+    const version = (requestVersions.current[id] ?? 0) + 1;
+    requestVersions.current[id] = version;
+    setBodyParts((previous) => ({ ...previous, [id]: isClicked }));
     try {
-      await saveBodyPart(id, isClicked as number, staticPatientId, token!);
+      const { data } = await saveBodyPart(id, Number(isClicked), staticPatientId, token!);
+      if (data?.rejectedChanges?.length && requestVersions.current[id] === version) {
+        setBodyParts((previous) => ({ ...previous, [id]: data.isClicked }));
+      }
     } catch (error) {
       console.error(`Error while saving body part ${id}`, error);
     }

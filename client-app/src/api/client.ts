@@ -1,4 +1,5 @@
 import axios from 'axios';
+import type { RejectedChange } from './changeMetadata';
 import { useAuthStore } from '../stores/authStore';
 
 const client = axios.create({
@@ -20,8 +21,12 @@ client.interceptors.request.use((config) => {
 });
 
 client.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    notifyRejected(response.data?.rejectedChanges);
+    return response;
+  },
   (error) => {
+    notifyRejected(error.response?.data?.rejectedChanges);
     if (error.response?.status === 401) {
       console.error('Unauthorized');
     }
@@ -30,3 +35,7 @@ client.interceptors.response.use(
 );
 
 export default client;
+
+function notifyRejected(changes?: RejectedChange[]) {
+  if (changes?.length) window.dispatchEvent(new CustomEvent('pls:rejected-changes', { detail: changes }));
+}

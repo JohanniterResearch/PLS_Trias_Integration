@@ -9,13 +9,23 @@ namespace PLS.Api.Models.DTOs;
 // respiration and blutung are booleans rather than strings.
 public record PersonsV2Request(int operationSceneId);
 public record VerifyPatientQrCodeV2Request(string qr_code, int operationSceneId);
-public record UpdateTriageColorV2Request(string? triageColor, bool? respiration, bool? blutung);
-public record UpdateRespirationV2Request(bool respiration);
-public record UpdatePatientLocationV2Request(
-    [Range(-90.0, 90.0)] double lat,
-    [Range(-180.0, 180.0)] double lng);
+public class UpdateTriageColorV2Request : ChangeMetadata
+{
+    public string? triageColor { get; set; }
+    public bool? respiration { get; set; }
+    public bool? blutung { get; set; }
+}
+public class UpdateRespirationV2Request : ChangeMetadata
+{
+    [Required] public bool? respiration { get; set; }
+}
+public class UpdatePatientLocationV2Request : ChangeMetadata
+{
+    [Required, Range(-90.0, 90.0)] public double? lat { get; set; }
+    [Required, Range(-180.0, 180.0)] public double? lng { get; set; }
+}
 
-public class AmbulanzprotokollPage1UpsertRequest
+public class AmbulanzprotokollPage1UpsertRequest : ChangeMetadata
 {
     [JsonPropertyName("status")]
     public string Status { get; set; } = "draft";
@@ -23,8 +33,8 @@ public class AmbulanzprotokollPage1UpsertRequest
     [JsonPropertyName("formState")]
     public JsonElement FormState { get; set; }
 
-    // Optimistic concurrency: the revision this edit is based on. Null skips the
-    // check (legacy clients); a mismatch returns 409 with the server's revision.
+    // Legacy clients may still use the document revision. Timestamp-aware clients
+    // resolve individual fields through ChangedAt/FieldChangedAt instead.
     [JsonPropertyName("expectedRevision")]
     public int? ExpectedRevision { get; set; }
 }
@@ -45,6 +55,10 @@ public class AmbulanzprotokollPage1Response
 
     [JsonPropertyName("finalizedAt")]
     public DateTime? FinalizedAt { get; init; }
+
+    [JsonPropertyName("rejectedChanges")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<RejectedChange>? RejectedChanges { get; init; }
 
     [JsonPropertyName("revision")]
     public int Revision { get; init; }

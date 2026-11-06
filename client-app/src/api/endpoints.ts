@@ -1,6 +1,6 @@
 import client from './client';
+import { changeMetadata } from './changeMetadata';
 import type { AuthResponse, Patient, OperationScene, BodyParts, GenerateQrCodesResponse } from '../types';
-import type { Page1PersistedRecord, Page1State } from '../features/ambulanzprotokoll-page1/page1State';
 import type { TriageColor } from '../types/triageColor';
 
 // Auth
@@ -24,47 +24,30 @@ export const getPersons = (operationSceneId: number, token: string) =>
 export const updateTriageColor = (patientId: number, data: {
   triageColor?: TriageColor; respiration?: boolean; blutung?: boolean;
 }, token: string) =>
-  client.post(`/v2/persons/${patientId}/update-triage-color`, data, { headers: { Authorization: `Bearer ${token}` } });
+  client.post(`/v2/persons/${patientId}/update-triage-color`, { ...data, ...changeMetadata() }, { headers: { Authorization: `Bearer ${token}` } });
 
 export const updateRespiration = (patientId: number, data: {
   respiration: boolean;
 }, token: string) =>
-  client.post(`/v2/persons/${patientId}/respiration`, data, { headers: { Authorization: `Bearer ${token}` } });
+  client.post(`/v2/persons/${patientId}/respiration`, { ...data, ...changeMetadata() }, { headers: { Authorization: `Bearer ${token}` } });
 
 export const updatePatientLocation = (patientId: number, data: {
   lat: number; lng: number;
 }, token: string) =>
-  client.post(`/v2/persons/${patientId}/location`, data, { headers: { Authorization: `Bearer ${token}` } });
+  client.post(`/v2/persons/${patientId}/location`, { ...data, ...changeMetadata() }, { headers: { Authorization: `Bearer ${token}` } });
 
 export const verifyPatientQrCode = (qr_code: string, operationSceneId: number, token: string) =>
   client.post<{ patientId: number }>('/v2/verify-patient-qr-code', { qr_code, operationSceneId }, { headers: { Authorization: `Bearer ${token}` } });
 
 // Body Parts
 export const saveBodyPart = (bodyPartId: string, isClicked: number, idpatient: number, token: string) =>
-  client.put('/save-body-part', { bodyPartId, isClicked, idpatient }, { headers: { Authorization: `Bearer ${token}` } });
+  client.put('/save-body-part', { bodyPartId, isClicked: Number(isClicked), idpatient, ...changeMetadata() }, { headers: { Authorization: `Bearer ${token}` } });
 
 export const getBodyParts = (idpatient: number, token: string) =>
   client.get<BodyParts>(`/get-body-parts?idpatient=${idpatient}`, { headers: { Authorization: `Bearer ${token}` } });
 
-// Ambulanzprotokoll page 1
-export const getAmbulanzprotokollPage1 = (patientId: number, token?: string) =>
-  client.get<Page1PersistedRecord | null>(`/v2/persons/${patientId}/ambulanzprotokoll-page1`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-  });
-
-export const putAmbulanzprotokollPage1 = (
-  patientId: number,
-  payload: {
-    formState: Page1State;
-    status: 'draft' | 'finalized';
-    finalizedAt: string | null;
-    updatedAt: string;
-  },
-  token?: string,
-) =>
-  client.put<Page1PersistedRecord>(`/v2/persons/${patientId}/ambulanzprotokoll-page1`, payload, {
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-  });
+// Ambulanzprotokoll page 1: use the same partial-update contract in both API entry points.
+export { getPage1 as getAmbulanzprotokollPage1, putPage1 as putAmbulanzprotokollPage1 } from '../features/ambulanzprotokoll-page1/page1Api';
 
 // QR Codes
 export const generatePatientQRCodes = (number: number, token: string) =>
