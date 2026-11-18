@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { useQrScanner } from '../hooks/useQrScanner';
+import CameraFeedback from '../components/CameraFeedback';
 import { verifyPatientQrCode, getUnusedPatientQrCodesDev } from '../api/endpoints';
 import { usePatientLocationStore } from '../stores/patientLocationStore';
 
@@ -61,23 +62,19 @@ export default function ScanPatient() {
       });
   };
 
-  const { cameraBlocked, stopScanner } = useQrScanner({
+  const { cameraError, isStarting, retryScanner, stopScanner } = useQrScanner({
     elementId: 'reader',
     fps: 5,
-    qrbox: { width: 200, height: 200 },
     onSuccess: onScanSuccess,
   });
 
   return (
     <div>
       <h2>Bitte einen Patienten QR-Code scannen</h2>
-      <div id="reader"></div>
-      {cameraBlocked && (
-        <p style={{ color: 'red', fontWeight: 'bold' }}>
-          Der Zugriff auf die Kamera wurde verweigert. Bitte erlauben Sie den
-          Zugriff auf die Kamera über die Einstellungen.
-        </p>
-      )}
+      <div className="qr-scanner-wrap">
+        <div id="reader" />
+      </div>
+      <CameraFeedback error={cameraError} isStarting={isStarting} onRetry={retryScanner} />
       {errorMessage && (
         <p style={{ color: 'red', fontWeight: 'bold' }}>{errorMessage}</p>
       )}

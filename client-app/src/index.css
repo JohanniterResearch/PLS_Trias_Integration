@@ -363,7 +363,22 @@ button:disabled {
   background: #000;
   border-radius: 8px;
   overflow: hidden;
-  margin: 8px 0;
+  margin: 8px auto;
+}
+
+/* Full-width portrait camera on phones. Other login content keeps its padding.
+   Leave video height/aspect ratio to the scanner so overlay and scan coordinates
+   continue to describe the same image. */
+@media (max-width: 600px) and (orientation: portrait) {
+  .qr-page .qr-scanner-wrap {
+    width: calc(100% + 48px);
+    max-width: none;
+    margin-inline: -24px;
+  }
+
+  .qr-scanner-wrap {
+    border-radius: 0;
+  }
 }
 
 /* ── Triage touch workflow ── */

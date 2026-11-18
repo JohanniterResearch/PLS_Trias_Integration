@@ -27,7 +27,9 @@ vi.mock('../hooks/useQrScanner', () => ({
   useQrScanner: ({ onSuccess }: { onSuccess: (decodedText: string) => void }) => {
     scannerSuccessHandler = onSuccess;
     return {
-      cameraBlocked: false,
+      cameraError: null,
+      isStarting: false,
+      retryScanner: vi.fn(),
       stopScanner: stopScannerMock,
       scannerRef: { current: null },
     };
