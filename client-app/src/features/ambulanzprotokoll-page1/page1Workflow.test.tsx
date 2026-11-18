@@ -352,3 +352,23 @@ it('normalizes medication rows from hydrated data to the canonical 8-row shape',
   expect(meds[0]).toEqual({ medikament: 'A', dosis: '1', art: 'iv', uhrzeit: '08:00' });
   expect(meds[1]).toEqual({ medikament: 'B', dosis: '2', art: 'po', uhrzeit: null });
 });
+
+it('preserves an older-format offline draft and later edits when reconnecting', async () => {
+  const old = buildRecord({
+    updatedAt: '2026-01-02T10:00:00.000Z',
+    formState: { ...buildRecord({}).formState, patient: { ...buildRecord({}).formState.patient, vorname: 'Anna' } },
+  });
+  window.localStorage.setItem('ambdoku:page1:patient:7', JSON.stringify(old));
+  getPage1Mock.mockRejectedValueOnce(new Error('offline'));
+  const server = buildRecord({ updatedAt: '2026-01-01T10:00:00.000Z' });
+  getPage1Mock.mockResolvedValue({ data: server });
+  putPage1Mock.mockImplementation(async (_id, payload) => ({
+    data: buildRecord({ formState: { ...server.formState, patient: { ...server.formState.patient, ...payload.formState.patient } } }),
+  }));
+  const { result } = renderHook(() => useAmbulanzprotokollPage1Workflow({ patientId: 7, operationSceneId: 11, token: 'token' }));
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  act(() => result.current.form.setValue('patient.familienname', 'Muster'));
+  await act(async () => { window.dispatchEvent(new Event('online')); await new Promise(resolve => setTimeout(resolve, 30)); });
+  expect(putPage1Mock).toHaveBeenCalled();
+  expect(putPage1Mock.mock.calls[0][1].formState.patient).toMatchObject({ vorname: 'Anna', familienname: 'Muster' });
+});

@@ -105,7 +105,10 @@ export const usePatientLocationStore = create<PatientLocationState>()(
           const token = useAuthStore.getState().token;
           if (!token) throw new Error('Kein Auth-Token verfügbar');
 
-          await updatePatientLocation(patientId, coordinates, token);
+          const { data } = await updatePatientLocation(patientId, coordinates, token);
+          if (data?.rejectedChanges?.length) {
+            throw new Error("Der Standort wurde wegen einer neueren Änderung nicht gespeichert.");
+          }
 
           set((state) => ({
             jobs: {

@@ -15,6 +15,8 @@ namespace PLS.Api.Tests;
 /// </summary>
 public class PlsWebAppFactory : WebApplicationFactory<Program>, IAsyncLifetime
 {
+    private IHost? _host;
+
     // Test-only credentials — independent of production defaults.
     // All test suites must use these constants instead of hardcoding credential strings.
     public const string TestAdminUsername = "test-admin";
@@ -65,6 +67,7 @@ public class PlsWebAppFactory : WebApplicationFactory<Program>, IAsyncLifetime
     protected override IHost CreateHost(IHostBuilder builder)
     {
         var host = base.CreateHost(builder);
+        _host = host;
 
         // The seeder marks the bootstrap admin with RequiresPasswordChange, which the
         // API now enforces as an authorization state. Tests model an admin who has
@@ -83,6 +86,16 @@ public class PlsWebAppFactory : WebApplicationFactory<Program>, IAsyncLifetime
 
     public new async Task DisposeAsync()
     {
-        await _mysql.DisposeAsync();
+        // Stop hosted services before removing the database they use.
+        try
+        {
+            // TestServer disposal can release singletons before the host is stopped.
+            if (_host != null) await _host.StopAsync();
+            await base.DisposeAsync();
+        }
+        finally
+        {
+            await _mysql.DisposeAsync();
+        }
     }
 }

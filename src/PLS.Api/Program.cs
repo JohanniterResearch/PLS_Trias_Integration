@@ -93,6 +93,7 @@ builder.Services.AddHealthChecks()
 
 // Services
 builder.Services.AddScoped<AuthService>();
+builder.Services.AddScoped<PatientChangeService>();
 builder.Services.AddSingleton<MetricsService>();
 builder.Services.AddSingleton<MqttPublishService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MqttPublishService>());

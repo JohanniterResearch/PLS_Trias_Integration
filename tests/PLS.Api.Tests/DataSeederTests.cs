@@ -192,6 +192,7 @@ public class DataSeederTests
         await using var scope = _factory.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<PlsDbContext>();
 
+        db.PatientChanges.RemoveRange(db.PatientChanges);
         db.AmbulanzprotokollPage1Forms.RemoveRange(db.AmbulanzprotokollPage1Forms);
         db.Bodies.RemoveRange(db.Bodies);
         db.QrCodePatients.RemoveRange(db.QrCodePatients);

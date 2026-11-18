@@ -1,8 +1,11 @@
 import client from '../../api/client';
-import type { Page1PersistedRecord, Page1State } from './page1State';
+import { changeMetadata } from '../../api/changeMetadata';
+import type { Page1PersistedRecord } from './page1State';
 
 export interface Page1SavePayload {
-  formState: Page1State;
+  formState: Record<string, unknown>;
+  changedAt: string;
+  fieldChangedAt: Record<string, string>;
   status: 'draft' | 'finalized';
 }
 
@@ -14,6 +17,6 @@ export const getPage1 = (patientId: number, token?: string) =>
   });
 
 export const putPage1 = (patientId: number, payload: Page1SavePayload, token?: string) =>
-  client.put<Page1ServerRecord>(`/v2/persons/${patientId}/ambulanzprotokoll-page1`, payload, {
+  client.put<Page1ServerRecord>(`/v2/persons/${patientId}/ambulanzprotokoll-page1`, { ...changeMetadata(payload.changedAt), ...payload }, {
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
   });

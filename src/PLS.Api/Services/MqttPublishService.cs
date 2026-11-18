@@ -49,6 +49,8 @@ public class MqttPublishService : IHostedService, IDisposable
     // Bounded — protects against unbounded memory growth during extended outages.
     private Channel<int>? _pendingQueue;
     private CancellationTokenSource? _drainCts;
+    private readonly object _stopLock = new();
+    private Task? _stopTask;
 
     // Exposed for the health check.
     public bool IsConnected => _client?.IsConnected ?? false;
@@ -91,8 +93,11 @@ public class MqttPublishService : IHostedService, IDisposable
 
         _client.DisconnectedAsync += async e =>
         {
+            // An intentional shutdown must not start another connection attempt.
+            if (_drainCts.IsCancellationRequested) return;
+
             _logger.LogWarning("MQTT disconnected (reason: {Reason}). Reconnecting...", e.ReasonString);
-            await ReconnectWithBackoffAsync(cancellationToken);
+            await ReconnectWithBackoffAsync(_drainCts.Token);
         };
 
         try
@@ -249,10 +254,16 @@ public class MqttPublishService : IHostedService, IDisposable
         }
     }
 
-    public async Task StopAsync(CancellationToken cancellationToken)
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        lock (_stopLock)
+            return _stopTask ??= StopCoreAsync(cancellationToken);
+    }
+
+    private async Task StopCoreAsync(CancellationToken cancellationToken)
     {
         _drainCts?.Cancel();
-        _pendingQueue?.Writer.Complete();
+        _pendingQueue?.Writer.TryComplete();
 
         if (_client?.IsConnected == true)
             await _client.DisconnectAsync();
@@ -260,6 +271,8 @@ public class MqttPublishService : IHostedService, IDisposable
 
     public void Dispose()
     {
+        // Some hosts dispose services before calling StopAsync. Always disconnect first.
+        StopAsync(CancellationToken.None).GetAwaiter().GetResult();
         _drainCts?.Dispose();
         _client?.Dispose();
     }

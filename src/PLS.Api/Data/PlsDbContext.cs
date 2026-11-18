@@ -7,6 +7,7 @@ public class PlsDbContext : DbContext
 {
     public PlsDbContext(DbContextOptions<PlsDbContext> options) : base(options) { }
 
+    public DbSet<PatientChange> PatientChanges => Set<PatientChange>();
     public DbSet<User> Users => Set<User>();
     public DbSet<Patient> Patients => Set<Patient>();
     public DbSet<AmbulanzprotokollPage1> AmbulanzprotokollPage1Forms => Set<AmbulanzprotokollPage1>();

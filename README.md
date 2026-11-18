@@ -60,3 +60,12 @@ leaves `mysql_db`/`mosquitto` down, which the API needs to connect to.
 - `src/PLS.Api/` — .NET 8 backend
 - `client-app/` — React frontend
 - `tests/PLS.Api.Tests/` — backend integration tests
+
+## Patient change history
+
+Concurrent edits are resolved per field: the newer original edit time wins.
+The backend records the decisions in `patient_changes`, and the frontend displays
+rejected changes. Development startup applies the required database migration.
+
+See [Patient change history (German)](PATIENT_CHANGE_HISTORY.md) for the rules,
+request format and history API.
