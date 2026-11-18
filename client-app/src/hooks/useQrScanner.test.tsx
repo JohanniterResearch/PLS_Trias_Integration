@@ -5,9 +5,10 @@ import { useQrScanner } from './useQrScanner';
 import { classifyCameraError } from './cameraError';
 import { getQrScanBox } from './qrScannerLayout';
 
-const { instances, startMock } = vi.hoisted(() => ({
+const { instances, startMock, simulateDelayedPlaying } = vi.hoisted(() => ({
   instances: [] as { isScanning: boolean; stop: ReturnType<typeof vi.fn>; clear: ReturnType<typeof vi.fn> }[],
   startMock: vi.fn(),
+  simulateDelayedPlaying: { value: false },
 }));
 vi.mock('html5-qrcode', () => ({
   Html5Qrcode: class {
@@ -17,7 +18,7 @@ vi.mock('html5-qrcode', () => ({
     constructor() { instances.push(this); }
     async start(...args: unknown[]) {
       await startMock(...args);
-      this.isScanning = true;
+      this.isScanning = startMock.mock.calls.length !== 1 || !simulateDelayedPlaying.value;
     }
   },
 }));
@@ -30,6 +31,7 @@ function deferred() {
 
 beforeEach(() => {
   instances.length = 0;
+  simulateDelayedPlaying.value = false;
   startMock.mockReset().mockResolvedValue(undefined);
   vi.stubGlobal('isSecureContext', true);
   Object.defineProperty(navigator, 'mediaDevices', {
@@ -111,6 +113,7 @@ describe('useQrScanner', () => {
 
   it('releases a late camera start after unmount before starting another scanner', async () => {
     const pending = deferred();
+    simulateDelayedPlaying.value = true;
     startMock.mockReturnValueOnce(pending.promise);
     const onSuccess = vi.fn();
     const first = renderHook(() => useQrScanner({ elementId: 'reader', onSuccess }));

@@ -34,6 +34,7 @@ export function useQrScanner({
   useEffect(() => {
     let cancelled = false;
     let scanner: Html5Qrcode | null = null;
+    let started = false;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const element = document.getElementById(elementId);
     let lastWidth = element?.clientWidth;
@@ -61,7 +62,7 @@ export function useQrScanner({
       resizeObserver?.disconnect();
       enqueue(async () => {
         if (!scanner) return;
-        if (scanner.isScanning) await scanner.stop();
+        if (started) await scanner.stop();
         scanner.clear();
         if (scannerRef.current === scanner) scannerRef.current = null;
       });
@@ -92,6 +93,7 @@ export function useQrScanner({
           // An unrecognized frame is not a camera access error.
           undefined,
         );
+        started = true;
       } catch (error) {
         if (!cancelled) setCameraError(classifyCameraError(error));
       } finally {
