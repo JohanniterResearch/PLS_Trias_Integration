@@ -14,7 +14,7 @@ describe('patientLocationStore', () => {
   beforeEach(() => {
     usePatientLocationStore.getState().clearJobs();
     useAuthStore.setState({ token: 'test-token', adminToken: null });
-    updatePatientLocationMock.mockReset();
+    updatePatientLocationMock.mockReset().mockResolvedValue({ data: {} });
     getCurrentPositionMock = vi.fn();
 
     Object.defineProperty(globalThis.navigator, 'geolocation', {
@@ -67,4 +67,14 @@ describe('patientLocationStore', () => {
     );
     expect(usePatientLocationStore.getState().jobs[31]?.status).toBe('written');
   });
+  it('records a rejected location update as an error', async () => {
+    getCurrentPositionMock.mockImplementation((success: (position: unknown) => void) =>
+      success({ coords: { latitude: 48.21, longitude: 16.37 } }));
+    updatePatientLocationMock.mockResolvedValue({ data: { rejectedChanges: [{ field: 'patient.location' }] } });
+
+    await usePatientLocationStore.getState().ensurePatientLocation(31);
+
+    expect(usePatientLocationStore.getState().jobs[31]?.status).toBe('error');
+  });
+
 });

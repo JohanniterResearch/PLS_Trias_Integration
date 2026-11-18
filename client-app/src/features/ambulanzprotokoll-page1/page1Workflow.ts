@@ -26,6 +26,7 @@ export function useAmbulanzprotokollPage1Workflow({ patientId, operationSceneId,
   const [watchedState, setWatchedState] = useState<Page1State>(createPage1Template);
   const pending = useRef<Record<string, PendingPage1Field>>({});
   const finalizeAt = useRef<string | null>(null);
+  const legacyDraft = useRef<Page1PersistedRecord['legacyDraft']>(undefined);
   const state = useRef(createPage1Template());
   const statusRef = useRef<Page1RecordStatus>('draft');
   const hydrated = useRef(false);
@@ -47,7 +48,7 @@ export function useAmbulanzprotokollPage1Workflow({ patientId, operationSceneId,
     const record: Page1PersistedRecord = {
       patientId, operationSceneId, formState: state.current,
       status: statusRef.current, updatedAt: changedAt, finalizedAt: finalizeAt.current,
-      pendingFields: pending.current, pendingFinalizeAt: finalizeAt.current,
+      pendingFields: pending.current, pendingFinalizeAt: finalizeAt.current, legacyDraft: legacyDraft.current,
     };
     writePage1Draft(record);
     setCurrentRecord(record);
@@ -57,14 +58,45 @@ export function useAmbulanzprotokollPage1Workflow({ patientId, operationSceneId,
 
   const flush = useCallback(async (): Promise<void> => {
     // Serialize requests; edits made during a request remain in the next batch.
-    while (inFlight.current) await inFlight.current;
-    if (!hydrated.current || (!Object.keys(pending.current).length && !finalizeAt.current)) return;
-    if (!token) { setSyncState('saved-local'); return; }
     const currentGeneration = generation.current;
-    const batch = { ...pending.current };
-    const requestedFinalizeAt = finalizeAt.current;
-    const payload = pendingPayload(batch, requestedFinalizeAt);
+    while (inFlight.current) await inFlight.current;
+    if (currentGeneration !== generation.current) return;
+    if (!hydrated.current || (!Object.keys(pending.current).length && !finalizeAt.current && !legacyDraft.current)) return;
+    if (!token) { setSyncState('saved-local'); return; }
     const send = async () => {
+      if (legacyDraft.current) {
+        try {
+          const { data: server } = await getPage1(patientId, token);
+          if (currentGeneration !== generation.current) return;
+          const legacy = legacyDraft.current;
+          if (legacy && (!server?.updatedAt || legacy.updatedAt > server.updatedAt)) {
+            const base = flattenFields(normalizePage1State(server?.formState ?? createPage1Template()));
+            for (const [path, value] of Object.entries(flattenFields(normalizePage1State(legacy.formState)))) {
+              if (!pending.current[path] && JSON.stringify(value) !== JSON.stringify(base[path])) {
+                pending.current[path] = { value, changedAt: legacy.updatedAt };
+              }
+            }
+            if (legacy.status === 'finalized') finalizeAt.current ??= legacy.finalizedAt ?? legacy.updatedAt;
+          }
+          legacyDraft.current = undefined;
+          if (server) {
+            statusRef.current = finalizeAt.current ? 'finalized' : server.status;
+            setStatus(statusRef.current);
+            replaceState(patchFields(normalizePage1State(server.formState), pending.current));
+          }
+          persistLocal();
+        } catch {
+          if (currentGeneration === generation.current) setSyncState('saved-local');
+          return;
+        }
+        if (!Object.keys(pending.current).length && !finalizeAt.current) {
+          setSyncState(statusRef.current === 'finalized' ? 'finalized' : 'saved-server');
+          return;
+        }
+      }
+      const batch = { ...pending.current };
+      const requestedFinalizeAt = finalizeAt.current;
+      const payload = pendingPayload(batch, requestedFinalizeAt);
       setSyncState('saving');
       try {
         const { data } = await putPage1(patientId, payload, token);
@@ -138,6 +170,7 @@ export function useAmbulanzprotokollPage1Workflow({ patientId, operationSceneId,
     hydrated.current = false;
     pending.current = {};
     finalizeAt.current = null;
+    legacyDraft.current = undefined;
     async function hydrate() {
       setSyncState('loading');
       const local = readPage1Draft(patientId);
@@ -147,6 +180,7 @@ export function useAmbulanzprotokollPage1Workflow({ patientId, operationSceneId,
         const base = normalizePage1State(server?.formState ?? createPage1Template());
         pending.current = local?.pendingFields ?? {};
         finalizeAt.current = local?.pendingFinalizeAt ?? null;
+        legacyDraft.current = local?.legacyDraft;
         // Upgrade old local drafts once; retain their original edit time.
         if (local && !local.pendingFields && local.updatedAt && (!server?.updatedAt || local.updatedAt > server.updatedAt)) {
           const before = flattenFields(base);
@@ -168,6 +202,9 @@ export function useAmbulanzprotokollPage1Workflow({ patientId, operationSceneId,
         if (cancelled) return;
         pending.current = local?.pendingFields ?? {};
         finalizeAt.current = local?.pendingFinalizeAt ?? null;
+        legacyDraft.current = local?.legacyDraft ?? (local && !local.pendingFields && local.updatedAt
+          ? { formState: local.formState, updatedAt: local.updatedAt, status: local.status, finalizedAt: local.finalizedAt }
+          : undefined);
         replaceState(normalizePage1State(local?.formState ?? createPage1Template()));
         statusRef.current = local?.status ?? 'draft';
         setStatus(statusRef.current);
@@ -201,7 +238,7 @@ export function useAmbulanzprotokollPage1Workflow({ patientId, operationSceneId,
 
   useEffect(() => {
     if (timer.current) clearTimeout(timer.current);
-    if (hydrated.current && (Object.keys(pending.current).length || finalizeAt.current)) timer.current = setTimeout(() => void flush(), 800);
+    if (hydrated.current && (Object.keys(pending.current).length || finalizeAt.current || legacyDraft.current)) timer.current = setTimeout(() => void flush(), 800);
     return () => { if (timer.current) clearTimeout(timer.current); };
   }, [flush, watchedState]);
 

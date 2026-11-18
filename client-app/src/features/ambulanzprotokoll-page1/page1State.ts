@@ -134,6 +134,7 @@ export interface PendingPage1Field {
 }
 
 export interface Page1PersistedRecord {
+  legacyDraft?: { formState: Page1State; updatedAt: string; status: Page1RecordStatus; finalizedAt: string | null };
   pendingFields?: Record<string, PendingPage1Field>;
   pendingFinalizeAt?: string | null;
   rejectedChanges?: import('../../api/changeMetadata').RejectedChange[];

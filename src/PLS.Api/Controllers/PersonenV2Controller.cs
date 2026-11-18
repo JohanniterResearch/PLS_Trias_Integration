@@ -247,7 +247,7 @@ public class PersonenV2Controller : ControllerBase
             ? new JsonObject() : JsonNode.Parse(request.FormState.GetRawText()) as JsonObject;
         if (incoming == null) return BadRequest(new { message = "formState muss ein Objekt sein" });
         var fields = ChangeFields.Flatten(incoming).ToList();
-        if (fields.Any(f => !ChangeFields.Ids.ContainsKey("form." + f.Path)))
+        if (fields.Any(f => f.Path == "status" || !ChangeFields.Ids.ContainsKey("form." + f.Path)))
             return BadRequest(new { message = "Unbekanntes Formularfeld" });
 
         return await _changes.ExecuteAsync(patientId, async patient =>
