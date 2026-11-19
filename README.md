@@ -39,6 +39,39 @@ in `backups/` (`BACKUP_KEEP` in `.env`, then re-run `install.sh`). Check with
 `systemctl list-timers pls-backup.timer`. Dumps inside the container die with it: back up the
 container (including `.env` and `backups/`) off-host as well.
 
+### Production with Portainer (Git stack)
+
+Alternative to `install.sh`: Portainer deploys the `prod` branch with
+`docker-compose.prod.yml`, which needs no `.env` file and no files on the host. Every deploy
+rebuilds the images from the checked-out commit (about 3-4 GB RAM during the build); the
+running version keeps serving until the new one starts. Don't run both `install.sh` and this
+stack on the same host.
+
+1. Stacks → Add stack → Repository: URL of this repository, reference
+   `refs/heads/prod`, compose path `docker-compose.prod.yml`. The stack name becomes the
+   volume prefix (`<name>_mysql_data`); keep it fixed.
+2. Environment variables. Generate secrets with `openssl rand -hex 24`: Portainer passes them
+   through an env file, where a `$` is read as a variable reference, and the MQTT password must
+   not contain `:`. MySQL keeps the DB passwords from the first deploy; don't change them later.
+
+   | Variable | Required | Meaning |
+   |---|---|---|
+   | `DB_PASSWORD`, `DB_ROOT_PASSWORD` | yes | MySQL passwords |
+   | `JWT_SECRET` | yes | token signing key, at least 32 characters |
+   | `ADMIN_PASSWORD` | yes | initial `admin` password, change is forced on first login |
+   | `MQTT_PASSWORD` | yes | broker password of `pls-backend` |
+   | `PLS_BIND_ADDRESS` | yes | LAN IP of this LXC that NPMplus connects to |
+   | `TRUSTED_PROXY` | yes | NPMplus IP(s), comma-separated |
+   | `LOGIN_RATE_LIMIT`, `ALLOWED_ORIGINS`, `MQTT_REDACT_*` | no | as in `.env.example` |
+
+3. Enable GitOps updates (polling or webhook). "Re-pull image" is not needed; the images are
+   always rebuilt.
+4. NPMplus: forward to `http://<PLS_BIND_ADDRESS>:8080`, certificate with Force SSL.
+
+**Release:** test on `main`, then `git push origin main:prod`; Portainer deploys it on the
+next poll. Migrations run on every deploy and only forward. This stack makes **no backups**
+(testing phase without real patient data); add dumps before it holds real data.
+
 ### Development
 
 Copy `.env.example` to `.env` and fill in all values (see comments in that

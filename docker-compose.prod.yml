@@ -1,0 +1,125 @@
+# Production stack for Portainer (Git repository stack on the "prod" branch).
+# Self-contained: no .env file and no files on the host. All variables are set in the Portainer
+# stack; see README "Production with Portainer". For a plain server use install.sh instead.
+#
+# Every deploy rebuilds the images from the checked-out commit (pull_policy: build), so a
+# GitOps update always runs the new code. The running version keeps serving during the build.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  # One-shot migration job: runs EF migrations and seeds initial data, then exits.
+  # Migrations run forward only: back up the database before moving the prod branch.
+  db-migrate:
+    # Same image as pls-app (built once per deploy); only pls-app has the build section.
+    image: pls-app:production
+    pull_policy: never
+    logging: *logging
+    environment:
+      # Explicit: Production keeps the seeder from creating the presentation account.
+      - ASPNETCORE_ENVIRONMENT=Production
+      - PLS_MIGRATE_ONLY=true
+      - ConnectionStrings__DefaultConnection=Server=mysql_db;Port=3306;Database=pls;User=${DB_USER:-pls_user};Password=${DB_PASSWORD:?DB_PASSWORD must be set}
+      - Jwt__Secret=${JWT_SECRET:?JWT_SECRET must be set}
+      - Jwt__Issuer=PLS
+      - Bootstrap__AdminUsername=${ADMIN_USERNAME:-admin}
+      - Bootstrap__AdminPassword=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set}
+      - Mqtt__Enabled=false
+    depends_on:
+      mysql_db:
+        condition: service_healthy
+    restart: "no"
+
+  pls-app:
+    build: .
+    image: pls-app:production
+    pull_policy: build
+    logging: *logging
+    ports:
+      # The LXC's LAN address that NPMplus connects to. Docker publishes ports past the host
+      # firewall, so binding to one address is what keeps 8080 off other interfaces.
+      - "${PLS_BIND_ADDRESS:?PLS_BIND_ADDRESS must be set (the LXC's LAN IP)}:8080:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ConnectionStrings__DefaultConnection=Server=mysql_db;Port=3306;Database=pls;User=${DB_USER:-pls_user};Password=${DB_PASSWORD}
+      - Jwt__Secret=${JWT_SECRET}
+      - Jwt__Issuer=PLS
+      - Jwt__AdminExpirationMinutes=60
+      - Jwt__QrExpirationMinutes=480
+      - Jwt__UserExpirationMinutes=480
+      - Jwt__RefreshTokenExpirationDays=7
+      - Bootstrap__AdminUsername=${ADMIN_USERNAME:-admin}
+      - Bootstrap__AdminPassword=${ADMIN_PASSWORD}
+      - Mqtt__Enabled=true
+      - Mqtt__BrokerHost=mosquitto
+      - Mqtt__BrokerPort=1883
+      - Mqtt__ClientId=pls-backend
+      # mosquitto/acl grants publishing to the user "pls-backend" only.
+      - Mqtt__Username=${MQTT_USERNAME:-pls-backend}
+      - Mqtt__Password=${MQTT_PASSWORD:?MQTT_PASSWORD must be set}
+      - Mqtt__RedactName=${MQTT_REDACT_NAME:-true}
+      - Mqtt__RedactLocation=${MQTT_REDACT_LOCATION:-false}
+      - Mqtt__RedactPersonalData=${MQTT_REDACT_PERSONAL_DATA:-false}
+      # CORS: the app serves its own frontend, so this is only needed for other origins.
+      - PLS_ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
+      # NPMplus IP(s): only these may pass on the real client IP the login rate limit uses.
+      - TRUSTED_PROXY=${TRUSTED_PROXY:?TRUSTED_PROXY must be set (the NPMplus IP)}
+      - RateLimiting__AuthPermitLimit=${LOGIN_RATE_LIMIT:-10}
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  mysql_db:
+    image: mysql:8.0
+    logging: *logging
+    environment:
+      - MYSQL_USER=${DB_USER:-pls_user}
+      - MYSQL_PASSWORD=${DB_PASSWORD}
+      - MYSQL_DATABASE=pls
+      - MYSQL_ROOT_PASSWORD=${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD must be set}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${DB_USER:-pls_user}", "-p${DB_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  mosquitto:
+    # Config and ACL baked in, password file written at start (mosquitto/Dockerfile).
+    build: ./mosquitto
+    image: pls-mosquitto:production
+    pull_policy: build
+    logging: *logging
+    environment:
+      - MQTT_USERNAME=${MQTT_USERNAME:-pls-backend}
+      - MQTT_PASSWORD=${MQTT_PASSWORD}
+    volumes:
+      - mosquitto_data:/mosquitto/data
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "localhost", "-p", "1883",
+             "-u", "${MQTT_USERNAME:-pls-backend}", "-P", "${MQTT_PASSWORD}",
+             "-t", "pls/healthcheck", "-m", "1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  mosquitto_data:
